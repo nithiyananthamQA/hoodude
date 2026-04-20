@@ -6,6 +6,7 @@ import { useCart } from "../store/CartContext";
 import { useWishlist } from "../store/WishlistContext";
 import { useAuth } from "../store/AuthContext";
 import { products } from "./products";
+import { formatPrice } from "../utils/currency";
 
 interface SiteHeaderProps {
   onOpenCart: () => void;

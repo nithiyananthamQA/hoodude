@@ -1,2 +1,0 @@
-src/app/components/LandingPage.tsx:const imgContent = "https://images.unsplash.com/photo-1556906781-9a412961c28c?q=80&w=2574&auto=format&fit=crop";
-src/app/components/LandingPage.tsx:                <img src="https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?auto=format&fit=crop&q=80&w=800" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700" alt={p.name} />

@@ -1,4 +1,4 @@
-import { Star, ArrowRight, Send, Truck, RotateCcw, Leaf, ShieldCheck, Check } from "lucide-react";
+import { Star, ArrowRight, Send, Truck, RotateCcw, Leaf, ShieldCheck, Check, Play } from "lucide-react";
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { motion, useScroll, useTransform } from "motion/react";
@@ -150,7 +150,7 @@ function WatchAndBuy() {
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-6">
                  <div className="w-10 h-10 rounded-full bg-white/20 backdrop-blur-md flex items-center justify-center mb-4">
-                    <site-icon name="play" className="text-white" />
+                    <Play size={16} className="text-white fill-white" />
                  </div>
                  <p className="text-white text-xs font-bold uppercase tracking-widest mb-1">{item.username}</p>
                  <p className="text-white/80 text-[13px] line-clamp-1">{item.caption}</p>
