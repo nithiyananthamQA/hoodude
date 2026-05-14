@@ -1,4 +1,4 @@
-import { ArrowLeft, Sparkles, Upload, Image as ImageIcon, Type, Layers, ChevronRight, ShoppingBag, Minus, Plus, RotateCw, Box, Glasses, User, X, Undo2, Redo2 } from "lucide-react";
+import { ArrowLeft, Sparkles, Upload, Image as ImageIcon, Type, Layers, ChevronRight, ShoppingBag, Minus, Plus, RotateCw, Box, Glasses, User, X, Undo2, Redo2, Save, Share2, Heart } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router";
 import { Suspense, useEffect, useMemo, useRef, useState, Component, ReactNode, lazy } from "react";
 import { motion, AnimatePresence } from "motion/react";
@@ -355,6 +355,141 @@ function CustomizePageInner({
   }, [product.price, quantity, layers, layerSurchargesPerUnit, TRIM_SURCHARGE, placements]);
 
   const [breakdownOpen, setBreakdownOpen] = useState(false);
+
+  // ─── Saved designs library (Slice 6) ─────────────────────────────────
+  // Designs are stored in localStorage under a global key keyed by a short
+  // id. Same browser → loads instantly. Different device → we show a clear
+  // "this design isn't available on this device" message because we don't
+  // have a backend yet.
+  type SavedDesignRecord = {
+    id: string;
+    productId: string;
+    name: string;
+    color: string;
+    trimColor: string | null;
+    size: string;
+    quantity: number;
+    placement: string;
+    layers: DesignLayer[];
+    thumbnail: string | null;
+    savedAt: string;
+  };
+  const SAVED_KEY = "hoodude.savedDesigns.v1";
+
+  const readSavedDesigns = (): SavedDesignRecord[] => {
+    try {
+      const raw = window.localStorage.getItem(SAVED_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const [savedDesigns, setSavedDesigns] = useState<SavedDesignRecord[]>(() => readSavedDesigns());
+  const [libraryOpen, setLibraryOpen] = useState(false);
+
+  const generateShortId = () =>
+    Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+
+  const saveCurrentDesign = (name?: string) => {
+    const id = generateShortId();
+    const thumbnail = viewer3DRef.current?.snapshot() ?? null;
+    const record: SavedDesignRecord = {
+      id,
+      productId: product.id,
+      name: name || `${product.name} · ${new Date().toLocaleDateString()}`,
+      color: activeColor.name,
+      trimColor,
+      size: selectedSize,
+      quantity,
+      placement: activePlacement,
+      layers,
+      thumbnail,
+      savedAt: new Date().toISOString(),
+    };
+    const next = [record, ...readSavedDesigns()].slice(0, 30); // cap to 30 saves
+    try {
+      window.localStorage.setItem(SAVED_KEY, JSON.stringify(next));
+      setSavedDesigns(next);
+      track("customize_save_design", { product_id: product.id, layer_count: layers.length });
+      toast.success("Design saved to your library", {
+        description: "Find it under 'My designs' on this device.",
+      });
+      return id;
+    } catch {
+      toast.error("Couldn't save", { description: "Storage is full. Remove old designs first." });
+      return null;
+    }
+  };
+
+  const loadSavedDesign = (record: SavedDesignRecord) => {
+    if (record.productId !== product.id) {
+      toast.error("Different product", {
+        description: "That saved design was for a different garment.",
+      });
+      return;
+    }
+    if (product.colors.some((c) => c.name === record.color)) setSelectedColor(record.color);
+    if (record.trimColor && product.colors.some((c) => c.name === record.trimColor)) {
+      setTrimColor(record.trimColor);
+    } else if (!record.trimColor) {
+      setTrimColor(null);
+    }
+    if (product.sizes.includes(record.size as SizeCode)) setSelectedSize(record.size as SizeCode);
+    if (typeof record.quantity === "number" && record.quantity > 0) setQuantity(record.quantity);
+    if (placements.some((p) => p.id === record.placement)) setActivePlacement(record.placement);
+    setLayers(record.layers);
+    setLibraryOpen(false);
+    toast.success(`Loaded "${record.name}"`);
+  };
+
+  const removeSavedDesign = (id: string) => {
+    const next = readSavedDesigns().filter((r) => r.id !== id);
+    try {
+      window.localStorage.setItem(SAVED_KEY, JSON.stringify(next));
+      setSavedDesigns(next);
+    } catch { /* ignore */ }
+  };
+
+  // Share URL — encodes the saved-design id in a query param so reload-by-
+  // link works on the same device. Auto-loads on mount if the id resolves
+  // to a saved record.
+  const shareCurrentDesign = async () => {
+    const id = saveCurrentDesign();
+    if (!id) return;
+    const url = `${window.location.origin}/customize?id=${product.id}&d=${id}`;
+    try {
+      // Native share sheet on mobile; falls back to clipboard otherwise.
+      if (navigator.share) {
+        await navigator.share({ title: "My HOODUDE design", url });
+      } else {
+        await navigator.clipboard.writeText(url);
+        toast.success("Link copied", {
+          description: "Same-browser shares only — open the link on this device to restore the design.",
+        });
+      }
+    } catch {
+      // User cancelled share — keep the design saved, that's still useful.
+    }
+  };
+
+  // On mount, if URL has ?d=<id>, try to load that saved design.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const sharedId = sp.get("d");
+    if (!sharedId) return;
+    const record = readSavedDesigns().find((r) => r.id === sharedId);
+    if (record && record.productId === product.id) {
+      loadSavedDesign(record);
+    } else if (sharedId) {
+      toast("Design not on this device", {
+        description: "Shared designs are saved locally. Open the link on the device where you created it.",
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const DRAFT_KEY = `hoodude.customize.draft.${product.id}`;
 
@@ -824,6 +959,36 @@ function CustomizePageInner({
               </button>
             </div>
             <button
+              onClick={() => setLibraryOpen(true)}
+              aria-label="My designs library"
+              title={`My designs (${savedDesigns.length})`}
+              className="hidden md:flex items-center gap-1.5 text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
+            >
+              <Heart size={13} strokeWidth={1.8} />
+              My designs
+              {savedDesigns.length > 0 && (
+                <span className="text-caption text-fg-faint tabular-nums">({savedDesigns.length})</span>
+              )}
+            </button>
+            <button
+              onClick={() => saveCurrentDesign()}
+              aria-label="Save design to your library"
+              title="Save design"
+              className="hidden md:flex items-center gap-1.5 text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
+            >
+              <Save size={13} strokeWidth={1.8} />
+              Save
+            </button>
+            <button
+              onClick={shareCurrentDesign}
+              aria-label="Share design link"
+              title="Share design"
+              className="hidden md:flex items-center gap-1.5 text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
+            >
+              <Share2 size={13} strokeWidth={1.8} />
+              Share
+            </button>
+            <button
               onClick={handleSaveDraft}
               className="text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
             >
@@ -1247,6 +1412,120 @@ function CustomizePageInner({
         productImage={tryOnImage}
         productCategory={product.category}
       />
+
+      {/* ── MY DESIGNS LIBRARY ──
+          Side drawer listing all designs the user has saved locally. Per-row
+          actions: Load (replaces current state), Remove. Header note clarifies
+          this is device-local storage so users don't expect cross-device sync. */}
+      <AnimatePresence>
+        {libraryOpen && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              onClick={() => setLibraryOpen(false)}
+              className="fixed inset-0 bg-black/40 z-[80]"
+            />
+            <motion.aside
+              initial={{ x: "100%" }}
+              animate={{ x: 0 }}
+              exit={{ x: "100%" }}
+              transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
+              role="dialog"
+              aria-label="My designs"
+              className="fixed top-0 right-0 h-full w-full sm:w-[440px] bg-white z-[81] shadow-2xl flex flex-col"
+            >
+              <header className="flex items-center justify-between px-6 py-5 border-b border-black/5 shrink-0">
+                <div>
+                  <span className="block text-[9px] uppercase tracking-[0.3em] font-medium text-fg-faint mb-0.5">
+                    Library
+                  </span>
+                  <h3 className="text-[18px] font-semibold tracking-tight text-fg">
+                    My designs
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setLibraryOpen(false)}
+                  aria-label="Close library"
+                  className="size-9 rounded-full hover:bg-black/5 flex items-center justify-center text-fg-mute hover:text-fg transition-colors"
+                >
+                  <X size={16} strokeWidth={1.6} />
+                </button>
+              </header>
+              <div className="flex-1 overflow-y-auto p-6">
+                {savedDesigns.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center text-center gap-3 py-16">
+                    <Heart size={26} strokeWidth={1.4} className="text-fg-faint" />
+                    <p className="text-meta text-fg-mute leading-relaxed max-w-[260px]">
+                      No saved designs yet. Build something, then tap{" "}
+                      <span className="font-semibold text-fg">Save</span> to keep it here.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-3">
+                    <p className="text-caption text-fg-faint leading-relaxed mb-1">
+                      Designs are saved on this device. To share with someone else, use the
+                      Share button — they'll need to open the link on the same device for it
+                      to load (no backend yet).
+                    </p>
+                    {savedDesigns.map((record) => {
+                      const isCurrentProduct = record.productId === product.id;
+                      return (
+                        <div
+                          key={record.id}
+                          className={`flex gap-3 p-3 rounded-2xl border transition-colors ${
+                            isCurrentProduct
+                              ? "border-black/10 hover:border-black/40"
+                              : "border-black/5 opacity-60"
+                          }`}
+                        >
+                          <div className="size-16 rounded-xl overflow-hidden bg-[#f5f5f5] border border-black/5 shrink-0">
+                            {record.thumbnail ? (
+                              <img src={record.thumbnail} alt="" className="w-full h-full object-cover" />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center text-fg-faint">
+                                <Layers size={18} strokeWidth={1.4} />
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex-1 min-w-0 flex flex-col">
+                            <p className="text-meta font-semibold text-fg truncate">{record.name}</p>
+                            <p className="text-caption text-fg-faint">
+                              {record.color}{record.trimColor ? ` + ${record.trimColor} trim` : ""} ·{" "}
+                              {record.size} · ×{record.quantity} ·{" "}
+                              {record.layers.length} design{record.layers.length === 1 ? "" : "s"}
+                            </p>
+                            <p className="text-caption text-fg-faint mt-0.5">
+                              {new Date(record.savedAt).toLocaleString()}
+                            </p>
+                            <div className="flex items-center gap-2 mt-2">
+                              <button
+                                onClick={() => loadSavedDesign(record)}
+                                disabled={!isCurrentProduct}
+                                className="text-meta font-semibold text-fg hover:text-brand transition-colors underline underline-offset-4 disabled:opacity-30 disabled:cursor-not-allowed disabled:no-underline"
+                              >
+                                {isCurrentProduct ? "Load" : "Different product"}
+                              </button>
+                              <button
+                                onClick={() => removeSavedDesign(record.id)}
+                                className="text-meta text-fg-mute hover:text-red-500 transition-colors underline underline-offset-4 ml-auto"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
