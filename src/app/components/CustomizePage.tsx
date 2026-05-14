@@ -1,4 +1,4 @@
-import { ArrowLeft, Sparkles, Upload, Image as ImageIcon, Type, Layers, ChevronRight, ShoppingBag, Minus, Plus, RotateCw, Box, Glasses, User, X } from "lucide-react";
+import { ArrowLeft, Sparkles, Upload, Image as ImageIcon, Type, Layers, ChevronRight, ShoppingBag, Minus, Plus, RotateCw, Box, Glasses, User, X, Undo2, Redo2 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router";
 import { Suspense, useEffect, useMemo, useRef, useState, Component, ReactNode, lazy } from "react";
 import { motion, AnimatePresence } from "motion/react";
@@ -90,7 +90,52 @@ function CustomizePageInner({
 
   // Per-placement design layers. Each placement holds at most one layer;
   // applying a new design to a placement replaces its previous layer.
-  const [layers, setLayers] = useState<DesignLayer[]>([]);
+  const [layers, setLayersRaw] = useState<DesignLayer[]>([]);
+
+  // ─── Undo / redo history ─────────────────────────────────────────────
+  // We snapshot the layers array on every committed change. Continuous
+  // gestures (wheel-resize, shift-rotate, drag-move) push one frame per
+  // event, which gives the user fine-grained step-back. Stack is capped at
+  // 60 entries so memory doesn't grow unbounded for long sessions.
+  const historyRef = useRef<DesignLayer[][]>([[]]);
+  const historyIndexRef = useRef(0);
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const HISTORY_MAX = 60;
+
+  const setLayers = (next: React.SetStateAction<DesignLayer[]>) => {
+    setLayersRaw((prev) => {
+      const resolved = typeof next === "function" ? (next as (p: DesignLayer[]) => DesignLayer[])(prev) : next;
+      // Drop any "future" frames (post-undo edit) before appending.
+      const truncated = historyRef.current.slice(0, historyIndexRef.current + 1);
+      truncated.push(resolved);
+      // Cap the stack — keep the most recent HISTORY_MAX frames.
+      const capped = truncated.length > HISTORY_MAX
+        ? truncated.slice(truncated.length - HISTORY_MAX)
+        : truncated;
+      historyRef.current = capped;
+      historyIndexRef.current = capped.length - 1;
+      setHistoryVersion((v) => v + 1);
+      return resolved;
+    });
+  };
+
+  const canUndo = historyIndexRef.current > 0;
+  const canRedo = historyIndexRef.current < historyRef.current.length - 1;
+  void historyVersion; // keep the derived booleans fresh
+
+  const undo = () => {
+    if (historyIndexRef.current <= 0) return;
+    historyIndexRef.current -= 1;
+    setLayersRaw(historyRef.current[historyIndexRef.current]);
+    setHistoryVersion((v) => v + 1);
+  };
+
+  const redo = () => {
+    if (historyIndexRef.current >= historyRef.current.length - 1) return;
+    historyIndexRef.current += 1;
+    setLayersRaw(historyRef.current[historyIndexRef.current]);
+    setHistoryVersion((v) => v + 1);
+  };
   const [designBusy, setDesignBusy] = useState(false);
   const [designError, setDesignError] = useState<string | null>(null);
   const aiAvailable = isDesignGenConfigured();
@@ -476,6 +521,54 @@ function CustomizePageInner({
   // for the floating Properties panel.
   const activeLayer = layers.find((l) => l.placementId === activePlacement) ?? null;
 
+  // ─── Keyboard shortcuts ────────────────────────────────────────────────
+  // Cmd/Ctrl+Z = undo · Cmd/Ctrl+Shift+Z (or Cmd/Ctrl+Y) = redo
+  // Delete/Backspace on the canvas (not in a text input) = remove active layer
+  // R = reset active layer's transform
+  // 1..8 = jump to placement at that index
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Skip when the user is typing in any input/textarea/contentEditable so
+      // we don't fight the prompt bar or text-design field.
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea" || t?.isContentEditable) return;
+
+      const mod = e.metaKey || e.ctrlKey;
+      const k = e.key.toLowerCase();
+
+      if (mod && k === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        return;
+      }
+      if (mod && ((k === "z" && e.shiftKey) || k === "y")) {
+        e.preventDefault();
+        redo();
+        return;
+      }
+      if ((k === "delete" || k === "backspace") && activeLayer) {
+        e.preventDefault();
+        removeLayer(activeLayer.id);
+        return;
+      }
+      if (k === "r" && activeLayer && !mod) {
+        e.preventDefault();
+        resetActiveLayerTransform();
+        return;
+      }
+      // Number keys 1..8 jump to placement at that index.
+      const n = parseInt(k, 10);
+      if (!Number.isNaN(n) && n >= 1 && n <= placements.length && !mod) {
+        e.preventDefault();
+        setActivePlacement(placements[n - 1].id);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeLayer?.id, placements.length]);
+
   const sidebarTools: { id: ToolId; icon: ReactNode; label: string }[] = [
     { id: "ai", icon: <Sparkles size={17} strokeWidth={1.6} />, label: "AI" },
     { id: "upload", icon: <Upload size={17} strokeWidth={1.6} />, label: "Upload" },
@@ -644,6 +737,29 @@ function CustomizePageInner({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Undo / Redo — keyboard shortcuts (Cmd/Ctrl+Z and Shift) also
+                trigger these. Buttons are disabled-styled when their stack
+                edge is hit so users get visual feedback. */}
+            <div className="flex items-center mr-1 rounded-full bg-black/[0.04] p-0.5">
+              <button
+                onClick={undo}
+                disabled={!canUndo}
+                aria-label="Undo (Cmd+Z)"
+                title="Undo (Cmd+Z)"
+                className="size-8 rounded-full flex items-center justify-center text-fg-mute enabled:hover:text-fg enabled:hover:bg-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <Undo2 size={14} strokeWidth={1.8} />
+              </button>
+              <button
+                onClick={redo}
+                disabled={!canRedo}
+                aria-label="Redo (Cmd+Shift+Z)"
+                title="Redo (Cmd+Shift+Z)"
+                className="size-8 rounded-full flex items-center justify-center text-fg-mute enabled:hover:text-fg enabled:hover:bg-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                <Redo2 size={14} strokeWidth={1.8} />
+              </button>
+            </div>
             <button
               onClick={handleSaveDraft}
               className="text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
