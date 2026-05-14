@@ -290,15 +290,14 @@ function CustomizePageInner({
     track("design_generated", { product: product.name, source: "stock" });
   };
 
+  // Simplified to 4 design zones. Two-color trim (collar / neck / cuffs /
+  // hem) is handled separately by the body+trim color pickers in the
+  // ConfigDock — not a design placement.
   const placements = [
-    { id: "chest_left", label: "Left chest" },
-    { id: "chest_center", label: "Center chest" },
-    { id: "large_center", label: "Large center", badge: "New", badgeType: "primary" },
-    { id: "sleeve_left_top", label: "Left sleeve top" },
-    { id: "sleeve_right_top", label: "Right sleeve top" },
-    { id: "back", label: "Back", badges: [{ text: "DTG", type: "default" }, { text: "New", type: "primary" }] },
-    { id: "label_outside", label: "Outside label", badges: [{ text: "DTG", type: "default" }] },
-    { id: "label_inside", label: "Inside label", badges: [{ text: "DTG", type: "default" }] },
+    { id: "front_chest",  label: "Front chest" },
+    { id: "back",         label: "Back" },
+    { id: "left_sleeve",  label: "Left hand" },
+    { id: "right_sleeve", label: "Right hand" },
   ];
   const [activePlacement, setActivePlacement] = useState(placements[0].id);
 
@@ -310,14 +309,10 @@ function CustomizePageInner({
   // per-unit total, not the surcharges (a 12-unit order pays for printing
   // 12 times). Two-color trim is a one-time setup fee.
   const PLACEMENT_SURCHARGE: Record<string, number> = {
-    chest_left: 4,
-    chest_center: 4,
-    large_center: 6,
+    front_chest: 6,
     back: 8,
-    sleeve_left_top: 4,
-    sleeve_right_top: 4,
-    label_outside: 3,
-    label_inside: 3,
+    left_sleeve: 4,
+    right_sleeve: 4,
   };
   const TRIM_SURCHARGE = trimColor ? 3 : 0;
 
@@ -690,19 +685,14 @@ function CustomizePageInner({
   };
 
   const rotateActiveLayer = (deltaRadians: number) => {
-    updateActiveLayer((l) => {
-      const [rx, ry, rz] = l.customRotation ?? [0, 0, 0];
-      // We rotate around the surface-normal axis (local Z of the decal) so
-      // it's an "in-plane" rotation from the user's perspective.
-      return { ...l, customRotation: [rx, ry, rz + deltaRadians] };
-    });
+    updateActiveLayer((l) => ({
+      ...l,
+      customRotation: (l.customRotation ?? 0) + deltaRadians,
+    }));
   };
 
   const setActiveLayerRotation = (radians: number) => {
-    updateActiveLayer((l) => {
-      const [rx, ry] = l.customRotation ?? [0, 0, 0];
-      return { ...l, customRotation: [rx, ry, radians] };
-    });
+    updateActiveLayer((l) => ({ ...l, customRotation: radians }));
   };
 
   /** Snap the active layer back to the placement's preset position/scale/rotation. */
@@ -1057,30 +1047,6 @@ function CustomizePageInner({
         </header>
 
         <div className="flex-1 overflow-hidden bg-[#f5f5f5] relative flex flex-col">
-          {/* Contextual print-method note. Surfaces only on placements where
-              the print technique differs from the front (DTG instead of the
-              standard embroidery). Black bar, white text — visible without
-              shouting, on-brand instead of alert-blue. */}
-          <AnimatePresence>
-            {(activePlacement === 'back' || activePlacement.startsWith('label')) && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: "auto", opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-                className="bg-fg text-white overflow-hidden"
-              >
-                <div className="px-8 py-2.5 flex items-center gap-3">
-                  <div className="size-4 rounded-full border border-white/30 flex items-center justify-center shrink-0">
-                    <span className="text-[9px] leading-none italic font-serif">i</span>
-                  </div>
-                  <span className="text-meta leading-snug">
-                    Printed with <span className="font-semibold">DTG (Direct to Garment)</span>. Your main front design will be embroidered separately.
-                  </span>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
 
           <div className="h-[56px] bg-white border-b border-black/[0.04] flex items-center px-8 relative z-20">
             <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-2 -mx-2 px-2 scroll-smooth">
@@ -1097,25 +1063,6 @@ function CustomizePageInner({
                     }`}
                   >
                     <span className="relative z-10">{p.label}</span>
-                    
-                    {(p.badge || p.badges) && (
-                      <div className="flex items-center gap-1">
-                        {p.badge && (
-                          <span className={`px-1.5 py-0.5 rounded-md text-[8px] font-semibold uppercase tracking-wider ${
-                            p.badgeType === "primary" ? "bg-brand text-white" : "bg-black/10 text-black/60"
-                          }`}>
-                            {p.badge}
-                          </span>
-                        )}
-                        {p.badges?.map((b) => (
-                          <span key={b.text} className={`px-1.5 py-0.5 rounded-md text-[8px] font-semibold uppercase tracking-wider ${
-                            b.type === "primary" ? "bg-brand text-white" : "bg-black/10 text-black/60"
-                          }`}>
-                            {b.text}
-                          </span>
-                        ))}
-                      </div>
-                    )}
 
                     {isActive && (
                       <motion.div
@@ -1156,19 +1103,15 @@ function CustomizePageInner({
                   activePlacement={activePlacement}
                   layers={layers}
                   onLayerDrag={(placementId, t) => {
-                    // Persist drag-position back into the layer. We preserve
-                    // any existing customRotation roll (Z) so rotate-then-move
-                    // doesn't reset the user's rotation.
+                    // Persist drag-position back into the layer. Drei's auto-
+                    // orient handles rotation against the surface normal so
+                    // dragging never touches the user's in-plane roll.
                     setLayers((prev) =>
-                      prev.map((l) => {
-                        if (l.placementId !== placementId) return l;
-                        const existingRoll = l.customRotation?.[2] ?? 0;
-                        return {
-                          ...l,
-                          customPosition: t.position,
-                          customRotation: [t.rotation[0], t.rotation[1], existingRoll] as [number, number, number],
-                        };
-                      }),
+                      prev.map((l) =>
+                        l.placementId === placementId
+                          ? { ...l, customPosition: t.position }
+                          : l,
+                      ),
                     );
                   }}
                   onLayerScale={(_placementId, factor) => scaleActiveLayer(factor)}
@@ -1234,7 +1177,7 @@ function CustomizePageInner({
                     <div className="flex items-center justify-between">
                       <span className="text-caption text-fg-mute">Rotation</span>
                       <span className="text-caption text-fg tabular-nums">
-                        {Math.round(((activeLayer.customRotation?.[2] ?? 0) * 180) / Math.PI)}°
+                        {Math.round(((activeLayer.customRotation ?? 0) * 180) / Math.PI)}°
                       </span>
                     </div>
                     <input
@@ -1242,7 +1185,7 @@ function CustomizePageInner({
                       min={-Math.PI}
                       max={Math.PI}
                       step={Math.PI / 90}
-                      value={activeLayer.customRotation?.[2] ?? 0}
+                      value={activeLayer.customRotation ?? 0}
                       onChange={(e) => setActiveLayerRotation(parseFloat(e.target.value))}
                       className="w-full accent-black h-1 cursor-pointer"
                       aria-label="Layer rotation"

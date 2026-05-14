@@ -9,8 +9,15 @@ export const DEFAULT_MODEL_PATH = "/3d/white-tshirt.glb";
 
 interface DecalTransform {
   position: [number, number, number];
-  rotation: [number, number, number];
-  scale: number;
+  /** In-plane roll around the surface normal (radians). drei's Decal auto-
+   *  orients to the closest vertex normal when `rotation` is a single
+   *  number, then applies this value as additional Z-roll. This lets the
+   *  decal lay flat on the curved surface AND let users twist it. */
+  rotation: number;
+  /** Vector scale: [width, height, depth-of-projection]. The depth is how
+   *  far through the mesh the projection cube extends; keep it small so a
+   *  front-placed decal doesn't also paint the back side of the garment. */
+  scale: [number, number, number];
 }
 
 /**
@@ -26,9 +33,11 @@ export interface DesignLayer {
   source: "ai" | "upload" | "stock" | "text";
   /** Optional scale override; falls back to placement preset. */
   scale?: number;
-  /** When set, overrides the placement preset position/rotation (from drag). */
+  /** Drag-positioned point on the body mesh (overrides the placement preset). */
   customPosition?: [number, number, number];
-  customRotation?: [number, number, number];
+  /** In-plane rotation around the surface normal, in radians.
+   *  Single scalar — drei auto-orients to the surface, this just twists it. */
+  customRotation?: number;
   hidden?: boolean;
 }
 
@@ -54,18 +63,12 @@ interface PlacementPreset {
 }
 
 const PLACEMENT_PRESETS: Record<string, PlacementPreset> = {
-  // Front side — yN ~0.75 is the chest line (about 3/4 up the body bbox).
-  chest_left:       { xN:  0.35, yN: 0.77, zN:  1, scaleN: 0.22 },
-  chest_center:     { xN:  0,    yN: 0.78, zN:  1, scaleN: 0.28 },
-  large_center:     { xN:  0,    yN: 0.55, zN:  1, scaleN: 0.55 },
-  sleeve_left_top:  { xN:  0.85, yN: 0.78, zN:  1, scaleN: 0.18 },
-  sleeve_right_top: { xN: -0.85, yN: 0.78, zN:  1, scaleN: 0.18 },
-  // Back side — full graphic across the upper-mid back.
-  back:             { xN:  0,    yN: 0.62, zN: -1, scaleN: 0.6 },
-  // Care/brand label below the back-collar (outside) and on the inside
-  // neckline (inside, same Z but slightly higher).
-  label_outside:    { xN:  0,    yN: 0.92, zN: -1, scaleN: 0.1 },
-  label_inside:     { xN:  0,    yN: 0.94, zN: -1, scaleN: 0.08 },
+  // Four zones, simple and obvious. Two-color trim (collar/cuffs/hem) is a
+  // separate body+trim color system — not a design placement.
+  front_chest:  { xN:  0,    yN: 0.68, zN:  1, scaleN: 0.45 },
+  back:         { xN:  0,    yN: 0.65, zN: -1, scaleN: 0.55 },
+  left_sleeve:  { xN:  0.85, yN: 0.78, zN:  1, scaleN: 0.18 },
+  right_sleeve: { xN: -0.85, yN: 0.78, zN:  1, scaleN: 0.18 },
 };
 
 export function getPlacementPreset(id?: string): PlacementPreset | null {
@@ -88,42 +91,47 @@ function resolvePlacement(id: string | undefined, bounds: BodyBounds | null): De
   const sizeY = max.y - min.y;
   const sizeZ = max.z - min.z;
   const cx = (min.x + max.x) / 2;
-  const cy = (min.y + max.y) / 2;
-  // Front is the max-Z extent, back is the min-Z extent — small inset so
-  // the decal sits on the surface rather than floating off the very edge.
-  const frontZ = max.z - sizeZ * 0.05;
-  const backZ = min.z + sizeZ * 0.05;
+  // For sleeve placements we push the X coordinate beyond the body bbox a
+  // little so the projection cube starts outside the sleeve and projects
+  // *inward* onto the sleeve surface. Without this, sleeve_left at
+  // xN = +0.85 sits just inside the body shell and the projection grabs
+  // the chest first.
+  const isSleeve = id === "left_sleeve" || id === "right_sleeve";
+  const xOffsetMul = isSleeve ? 0.65 : 0.5;
+  // Front is the max-Z extent, back is the min-Z extent.
+  const frontZ = max.z;
+  const backZ = min.z;
   const position: [number, number, number] = [
-    cx + (preset.xN * sizeX) / 2,
+    cx + preset.xN * sizeX * xOffsetMul,
     min.y + preset.yN * sizeY,
     preset.zN === 1 ? frontZ : backZ,
   ];
-  // Front-facing decals look forward (no Y-flip), back-facing decals are
-  // rotated 180° so they read correctly when the camera is behind the model.
-  const rotation: [number, number, number] = preset.zN === 1
-    ? [0, 0, preset.rollZ ?? 0]
-    : [0, Math.PI, preset.rollZ ?? 0];
-  return {
-    position,
-    rotation,
-    scale: sizeX * preset.scaleN,
-  };
+  // Pass roll as a single number → drei auto-orients to the closest
+  // surface normal (so decal lays flat on the curved fabric) then applies
+  // this Z-roll as twist. Lets us combine "face the right way out of the
+  // shirt" with "user wants the design tilted 30 degrees" cleanly.
+  const rotation: number = preset.rollZ ?? 0;
+  // Decal projection cube. The X/Y are the visible size of the decal. The
+  // Z is how far the cube extends through the mesh — KEEP THIS SMALL so a
+  // front-facing decal doesn't bleed through to the back of the garment.
+  // sizeZ * 0.4 = roughly the front-half of the bbox depth, enough to grab
+  // the fabric surface but not the opposite side.
+  const widthHeight = sizeX * preset.scaleN;
+  const depth = sizeZ * 0.4;
+  const scale: [number, number, number] = [widthHeight, widthHeight, depth];
+  return { position, rotation, scale };
 }
 
-/** Legacy export — used by CameraRig and a few callers that only need to
- *  know "is this placement on the back?". Returns null body-bounds so the
- *  absolute coordinates aren't relied on; callers should use the resolver
- *  when they actually need to render a decal. */
+/** Legacy export retained for callers that only check "is this on the back?".
+ *  Callers that actually render a decal should use `resolvePlacement` so
+ *  coordinates match the actual body mesh's bbox. */
 export function getPlacementProps(id?: string): DecalTransform | null {
-  // For camera-position purposes the absolute coordinate doesn't matter —
-  // CameraRig only looks at this to decide front-vs-back orbit. Return a
-  // sentinel based on the preset so existing callers keep working.
   const preset = getPlacementPreset(id);
   if (!preset) return null;
   return {
     position: [preset.xN * 0.15, 0.05, preset.zN === 1 ? 0.15 : -0.15],
-    rotation: preset.zN === 1 ? [0, 0, 0] : [0, Math.PI, 0],
-    scale: 0.2,
+    rotation: preset.rollZ ?? 0,
+    scale: [0.2, 0.2, 0.15],
   };
 }
 
@@ -134,7 +142,8 @@ interface RenderedLayer {
   /** Optional user-applied overrides; Model resolves the rest from the
    *  body-mesh bbox at render time so coordinates work universally. */
   customPosition?: [number, number, number];
-  customRotation?: [number, number, number];
+  /** In-plane roll (single radian scalar). */
+  customRotation?: number;
   customScale?: number;
 }
 
@@ -151,9 +160,10 @@ interface ModelProps {
   /** All layers to render. Each will be drawn as its own <Decal>. */
   layers: RenderedLayer[];
   /** When set, overrides the active layer's preset position/rotation. */
-  customDecal: { position: [number, number, number]; rotation: [number, number, number] } | null;
-  /** Fired when user drags the design across the body mesh. */
-  onCustomDecalChange: (t: { position: [number, number, number]; rotation: [number, number, number] }) => void;
+  customDecal: { position: [number, number, number] } | null;
+  /** Fired when user drags the design across the body mesh. Only the
+   *  position is transmitted; rotation comes from drei's auto-orient. */
+  onCustomDecalChange: (t: { position: [number, number, number] }) => void;
   /** Toggles whether drag-to-position is allowed (only when there's a real
    *  design — otherwise the placeholder is fixed to the active placement). */
   enableDrag: boolean;
@@ -241,22 +251,16 @@ function Model({
     };
   }, [enableDrag]);
 
-  // Convert a raycast hit to a (localPosition, localRotation) tuple. The
-  // rotation aligns the decal's local Z with the surface normal at the hit
-  // point so the projection lays flat against the curve of the shirt.
+  // Convert a raycast hit to a local-space position. We deliberately don't
+  // return rotation from the drag — drei's Decal auto-orients to the
+  // closest vertex normal so the projection always lays flat on the curved
+  // surface, regardless of where we drop the position. Letting drag also
+  // set rotation caused the design to tilt unexpectedly as users moved it.
   const transformFromHit = (e: ThreeEvent<PointerEvent>) => {
     if (!e.face) return null;
     const localPoint = e.object.worldToLocal(e.point.clone());
-    // e.face.normal is in geometry local space — same space the Decal lives in.
-    const normal = e.face.normal.clone();
-    const q = new THREE.Quaternion().setFromUnitVectors(
-      new THREE.Vector3(0, 0, 1),
-      normal,
-    );
-    const euler = new THREE.Euler().setFromQuaternion(q);
     return {
       position: [localPoint.x, localPoint.y, localPoint.z] as [number, number, number],
-      rotation: [euler.x, euler.y, euler.z] as [number, number, number],
     };
   };
 
@@ -368,8 +372,17 @@ function Model({
               if (!preset) return null;
               const isActive = layer.placementId === activePlacement;
               const finalPos = (isActive && customDecal?.position) ?? layer.customPosition ?? preset.position;
-              const finalRot = (isActive && customDecal?.rotation) ?? layer.customRotation ?? preset.rotation;
-              const finalScale = layer.customScale ?? preset.scale;
+              // Rotation: user-applied roll wins; falls back to preset's roll.
+              // Drei's Decal auto-orients to the surface when rotation is a
+              // number, then applies this as Z-roll, so this single scalar
+              // gives both "lays flat" + "user twist" behaviour.
+              const finalRot: number = layer.customRotation ?? preset.rotation;
+              // User-applied scale slider value (single number) replaces the
+              // visible width/height but keeps the preset's projection depth
+              // so the back-bleed protection isn't lost when resizing.
+              const finalScale: [number, number, number] = layer.customScale !== undefined
+                ? [layer.customScale, layer.customScale, preset.scale[2]]
+                : preset.scale;
               return (
                 <Decal
                   key={layer.id}
@@ -429,8 +442,8 @@ function placementCameraPosition(
   cinematic: boolean,
 ): THREE.Vector3 {
   if (placement === "back") return new THREE.Vector3(0, 0, cinematic ? -2.6 : -2.4);
-  if (placement?.includes("sleeve_left")) return new THREE.Vector3(1.8, 0.3, 1.2);
-  if (placement?.includes("sleeve_right")) return new THREE.Vector3(-1.8, 0.3, 1.2);
+  if (placement === "left_sleeve") return new THREE.Vector3(1.8, 0.3, 1.2);
+  if (placement === "right_sleeve") return new THREE.Vector3(-1.8, 0.3, 1.2);
   return new THREE.Vector3(0, cinematic ? 0.1 : 0, cinematic ? 2.6 : 2.4);
 }
 
@@ -500,7 +513,7 @@ interface Product3DViewerProps {
    * Fired when the user drags the active layer across the body mesh. Lets
    * the parent persist the new position/rotation back into the layer model.
    */
-  onLayerDrag?: (placementId: string, t: { position: [number, number, number]; rotation: [number, number, number] }) => void;
+  onLayerDrag?: (placementId: string, t: { position: [number, number, number] }) => void;
   /** Fired on wheel-over-body for the active layer. `factor` is multiplicative
    *  (e.g. 1.05 = grow 5%, 0.95 = shrink 5%). Parent clamps to sensible bounds. */
   onLayerScale?: (placementId: string, factor: number) => void;
@@ -664,13 +677,12 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
       .filter((x): x is RenderedLayer => x !== null);
   }, [effectiveLayers, textureVersion]);
 
-  // Free-form decal placement. When the user drags the design across the
-  // shirt, we override the placement preset with a custom (position, rotation)
-  // computed from the raycast hit. Reset whenever the design changes (new
-  // upload) or the user picks a different placement preset.
+  // Free-form decal positioning. When the user drags the design across the
+  // body mesh we override the placement preset's position only — rotation
+  // is auto-oriented to the surface normal by drei's Decal, so drag never
+  // tilts the design unexpectedly. User in-plane roll is on the layer.
   const [customDecal, setCustomDecal] = useState<{
     position: [number, number, number];
-    rotation: [number, number, number];
   } | null>(null);
   const [isDraggingDecal, setIsDraggingDecal] = useState(false);
   const [hasMovedDecal, setHasMovedDecal] = useState(false);
