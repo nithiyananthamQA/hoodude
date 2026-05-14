@@ -303,7 +303,58 @@ function CustomizePageInner({
   const [activePlacement, setActivePlacement] = useState(placements[0].id);
 
   const activeColor = product.colors.find((c) => c.name === selectedColor) ?? product.colors[0];
-  const totalPrice = product.price * quantity;
+
+  // ─── Pricing model (Slice 5) ───────────────────────────────────────────
+  // Mirrors common screen-print / embroidery / DTG markups. Surcharges are
+  // additive on top of the base product price; quantity multiplies the
+  // per-unit total, not the surcharges (a 12-unit order pays for printing
+  // 12 times). Two-color trim is a one-time setup fee.
+  const PLACEMENT_SURCHARGE: Record<string, number> = {
+    chest_left: 4,
+    chest_center: 4,
+    large_center: 6,
+    back: 8,
+    sleeve_left_top: 4,
+    sleeve_right_top: 4,
+    label_outside: 3,
+    label_inside: 3,
+  };
+  const TRIM_SURCHARGE = trimColor ? 3 : 0;
+
+  const layerSurchargesPerUnit = layers
+    .filter((l) => !l.hidden)
+    .reduce((sum, l) => sum + (PLACEMENT_SURCHARGE[l.placementId] ?? 0), 0);
+  const perUnitPrice = product.price + layerSurchargesPerUnit;
+  const subtotalDesigns = perUnitPrice * quantity;
+  const totalPrice = subtotalDesigns + TRIM_SURCHARGE;
+
+  // Itemised breakdown for the popover. Built once per render off the same
+  // data the total is built from so they're guaranteed in sync.
+  const priceLines = useMemo(() => {
+    const lines: Array<{ label: string; amount: number; note?: string }> = [
+      { label: "Base", amount: product.price * quantity, note: `${quantity} × $${product.price}` },
+    ];
+    if (layerSurchargesPerUnit > 0) {
+      const visible = layers.filter((l) => !l.hidden);
+      visible.forEach((l) => {
+        const ph = placements.find((p) => p.id === l.placementId);
+        const surcharge = PLACEMENT_SURCHARGE[l.placementId] ?? 0;
+        if (surcharge > 0) {
+          lines.push({
+            label: ph?.label ?? l.placementId,
+            amount: surcharge * quantity,
+            note: `$${surcharge} × ${quantity}`,
+          });
+        }
+      });
+    }
+    if (TRIM_SURCHARGE > 0) {
+      lines.push({ label: "Two-color trim setup", amount: TRIM_SURCHARGE, note: "one-time" });
+    }
+    return lines;
+  }, [product.price, quantity, layers, layerSurchargesPerUnit, TRIM_SURCHARGE, placements]);
+
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
 
   const DRAFT_KEY = `hoodude.customize.draft.${product.id}`;
 
@@ -377,7 +428,11 @@ function CustomizePageInner({
       color: activeColor.name,
       colorHex: activeColor.hex,
       size: selectedSize,
-      price: product.price,
+      // Per-unit price includes placement print surcharges so the cart
+      // reflects what the user saw on the customize page. Trim setup is
+      // a one-time fee — folded into the first unit so the cart total
+      // still matches the customize total exactly.
+      price: perUnitPrice + (TRIM_SURCHARGE > 0 && quantity > 0 ? TRIM_SURCHARGE / quantity : 0),
       quantity,
       maxStock: product.stock === "Make to Order" ? 200 : 50,
     });
@@ -774,13 +829,65 @@ function CustomizePageInner({
             >
               Save Draft
             </button>
-            <button
-              onClick={handleAddToCart}
-              className="flex items-center gap-2 px-5 h-9 bg-fg text-white rounded-full text-meta font-semibold hover:bg-brand transition-colors btn-press"
-            >
-              <ShoppingBag size={14} strokeWidth={1.8} />
-              Add to bag · ${totalPrice.toLocaleString()}
-            </button>
+            <div className="relative">
+              <button
+                onClick={handleAddToCart}
+                className="flex items-center gap-2 px-5 h-9 bg-fg text-white rounded-full text-meta font-semibold hover:bg-brand transition-colors btn-press"
+              >
+                <ShoppingBag size={14} strokeWidth={1.8} />
+                Add to bag · ${totalPrice.toLocaleString()}
+              </button>
+              {(layerSurchargesPerUnit > 0 || TRIM_SURCHARGE > 0) && (
+                <button
+                  onClick={() => setBreakdownOpen((v) => !v)}
+                  aria-label="Price breakdown"
+                  className="absolute -bottom-1 left-1/2 -translate-x-1/2 translate-y-full mt-1 text-caption text-fg-mute hover:text-fg underline underline-offset-4 whitespace-nowrap"
+                >
+                  {breakdownOpen ? "Hide breakdown" : "Price breakdown"}
+                </button>
+              )}
+              <AnimatePresence>
+                {breakdownOpen && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }}
+                    transition={{ duration: 0.18 }}
+                    className="absolute right-0 top-full mt-8 z-40 w-[280px] bg-white border border-black/5 rounded-2xl shadow-[0_12px_32px_-8px_rgba(0,0,0,0.16)] p-4"
+                  >
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="text-[9px] uppercase tracking-[0.22em] font-semibold text-fg-faint">
+                        Order total
+                      </span>
+                      <button
+                        onClick={() => setBreakdownOpen(false)}
+                        className="size-6 rounded-full hover:bg-black/5 flex items-center justify-center text-fg-mute hover:text-fg"
+                        aria-label="Close"
+                      >
+                        <X size={12} strokeWidth={1.8} />
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-1.5 text-meta">
+                      {priceLines.map((line, i) => (
+                        <div key={i} className="flex items-baseline justify-between gap-3">
+                          <div className="flex flex-col min-w-0">
+                            <span className="text-fg truncate">{line.label}</span>
+                            {line.note && (
+                              <span className="text-caption text-fg-faint">{line.note}</span>
+                            )}
+                          </div>
+                          <span className="text-fg tabular-nums">${line.amount.toLocaleString()}</span>
+                        </div>
+                      ))}
+                      <div className="border-t border-black/10 mt-2 pt-2 flex items-baseline justify-between font-semibold text-fg">
+                        <span>Total</span>
+                        <span className="tabular-nums">${totalPrice.toLocaleString()}</span>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
         </header>
 
