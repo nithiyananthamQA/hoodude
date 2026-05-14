@@ -422,6 +422,60 @@ function CustomizePageInner({
   /** Backward-compat alias used by older call sites in this file. */
   const clearDesign = clearActivePlacementLayer;
 
+  // ─── Per-layer transform editing (Slice 2) ────────────────────────────
+  // The "active layer" is the one at the current placement. These handlers
+  // mutate just that layer.
+  const MIN_SCALE = 0.04;
+  const MAX_SCALE = 0.8;
+
+  const updateActiveLayer = (mutator: (l: DesignLayer) => DesignLayer) => {
+    setLayers((prev) =>
+      prev.map((l) => (l.placementId === activePlacement ? mutator(l) : l)),
+    );
+  };
+
+  const scaleActiveLayer = (factor: number) => {
+    updateActiveLayer((l) => {
+      const current = l.scale ?? 0.2;
+      const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, current * factor));
+      return { ...l, scale: next };
+    });
+  };
+
+  const setActiveLayerScale = (scale: number) => {
+    updateActiveLayer((l) => ({ ...l, scale: Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale)) }));
+  };
+
+  const rotateActiveLayer = (deltaRadians: number) => {
+    updateActiveLayer((l) => {
+      const [rx, ry, rz] = l.customRotation ?? [0, 0, 0];
+      // We rotate around the surface-normal axis (local Z of the decal) so
+      // it's an "in-plane" rotation from the user's perspective.
+      return { ...l, customRotation: [rx, ry, rz + deltaRadians] };
+    });
+  };
+
+  const setActiveLayerRotation = (radians: number) => {
+    updateActiveLayer((l) => {
+      const [rx, ry] = l.customRotation ?? [0, 0, 0];
+      return { ...l, customRotation: [rx, ry, radians] };
+    });
+  };
+
+  /** Snap the active layer back to the placement's preset position/scale/rotation. */
+  const resetActiveLayerTransform = () => {
+    updateActiveLayer((l) => ({
+      ...l,
+      customPosition: undefined,
+      customRotation: undefined,
+      scale: undefined,
+    }));
+  };
+
+  // The currently-edited layer (if any) and its effective transform values
+  // for the floating Properties panel.
+  const activeLayer = layers.find((l) => l.placementId === activePlacement) ?? null;
+
   const sidebarTools: { id: ToolId; icon: ReactNode; label: string }[] = [
     { id: "ai", icon: <Sparkles size={17} strokeWidth={1.6} />, label: "AI" },
     { id: "upload", icon: <Upload size={17} strokeWidth={1.6} />, label: "Upload" },
@@ -705,19 +759,108 @@ function CustomizePageInner({
                   activePlacement={activePlacement}
                   layers={layers}
                   onLayerDrag={(placementId, t) => {
-                    // Persist the drag back into the layer so the position is
-                    // remembered after the user lets go and across re-renders.
+                    // Persist drag-position back into the layer. We preserve
+                    // any existing customRotation roll (Z) so rotate-then-move
+                    // doesn't reset the user's rotation.
                     setLayers((prev) =>
-                      prev.map((l) =>
-                        l.placementId === placementId
-                          ? { ...l, customPosition: t.position, customRotation: t.rotation }
-                          : l,
-                      ),
+                      prev.map((l) => {
+                        if (l.placementId !== placementId) return l;
+                        const existingRoll = l.customRotation?.[2] ?? 0;
+                        return {
+                          ...l,
+                          customPosition: t.position,
+                          customRotation: [t.rotation[0], t.rotation[1], existingRoll] as [number, number, number],
+                        };
+                      }),
                     );
                   }}
+                  onLayerScale={(_placementId, factor) => scaleActiveLayer(factor)}
+                  onLayerRotate={(_placementId, delta) => rotateActiveLayer(delta)}
                 />
               </Suspense>
             </ModelErrorBoundary>
+
+            {/* ── PROPERTIES PANEL ──
+                Floating right-side panel for fine-tuning the active layer.
+                Appears only when there's a layer at the active placement so
+                it never confuses first-time users with empty controls. */}
+            <AnimatePresence>
+              {activeLayer && (
+                <motion.div
+                  key="props"
+                  initial={{ opacity: 0, x: 16 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 16 }}
+                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                  className="absolute top-4 right-4 z-30 w-[252px] bg-white/95 backdrop-blur-xl border border-black/5 rounded-2xl shadow-[0_8px_32px_-12px_rgba(0,0,0,0.12)] p-4 flex flex-col gap-4"
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="block text-[9px] uppercase tracking-[0.3em] font-medium text-fg-faint mb-0.5">
+                        Properties
+                      </span>
+                      <h4 className="text-[13px] font-semibold text-fg leading-tight">
+                        {placements.find((p) => p.id === activePlacement)?.label ?? "Layer"}
+                      </h4>
+                    </div>
+                    <button
+                      onClick={resetActiveLayerTransform}
+                      className="text-caption text-fg-mute hover:text-fg underline underline-offset-4"
+                      title="Reset position, rotation and scale to placement default"
+                    >
+                      Reset
+                    </button>
+                  </div>
+
+                  {/* Scale slider — wheel-over-body also drives this. */}
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-caption text-fg-mute">Size</span>
+                      <span className="text-caption text-fg tabular-nums">
+                        {Math.round(((activeLayer.scale ?? 0.2) / 0.2) * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={MIN_SCALE}
+                      max={MAX_SCALE}
+                      step={0.005}
+                      value={activeLayer.scale ?? 0.2}
+                      onChange={(e) => setActiveLayerScale(parseFloat(e.target.value))}
+                      className="w-full accent-black h-1 cursor-pointer"
+                      aria-label="Layer size"
+                    />
+                  </div>
+
+                  {/* Rotation slider — Shift-drag on the model also drives this. */}
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-caption text-fg-mute">Rotation</span>
+                      <span className="text-caption text-fg tabular-nums">
+                        {Math.round(((activeLayer.customRotation?.[2] ?? 0) * 180) / Math.PI)}°
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-Math.PI}
+                      max={Math.PI}
+                      step={Math.PI / 90}
+                      value={activeLayer.customRotation?.[2] ?? 0}
+                      onChange={(e) => setActiveLayerRotation(parseFloat(e.target.value))}
+                      className="w-full accent-black h-1 cursor-pointer"
+                      aria-label="Layer rotation"
+                    />
+                  </div>
+
+                  <div className="border-t border-black/5 pt-3 -mx-1">
+                    <p className="text-[10px] leading-relaxed text-fg-faint px-1">
+                      <span className="font-semibold text-fg-mute">Tip:</span> drag on the model to move ·{" "}
+                      <kbd className="px-1 py-0.5 rounded bg-black/5 text-[9px]">Shift</kbd> + drag to rotate · scroll to resize
+                    </p>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* Drag-and-drop overlay — shows the moment the user drags an
                 image file over the workspace. Clearly affords "drop here". */}

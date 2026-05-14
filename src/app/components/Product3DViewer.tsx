@@ -74,6 +74,10 @@ interface ModelProps {
   enableDrag: boolean;
   /** Notifies parent so OrbitControls can be paused while dragging. */
   onDragChange: (dragging: boolean) => void;
+  /** Wheel-over-body resizes the active layer. Delta is multiplicative. */
+  onActiveLayerScale: (factor: number) => void;
+  /** Shift-drag rotates the active layer in-plane. Delta is radians. */
+  onActiveLayerRotate: (deltaRadians: number) => void;
 }
 
 function Model({
@@ -86,6 +90,8 @@ function Model({
   onCustomDecalChange,
   enableDrag,
   onDragChange,
+  onActiveLayerScale,
+  onActiveLayerRotate,
 }: ModelProps) {
   const { nodes, scene } = useGLTF(modelPath) as any;
   const groupRef = useRef<THREE.Group>(null!);
@@ -131,10 +137,28 @@ function Model({
     };
   };
 
+  // Pointer-drag bookkeeping. We use refs (not state) for "is the user
+  // currently rotating with shift held?" because we don't need re-renders
+  // mid-drag — only the final-state notifications matter.
+  const rotatingRef = useRef(false);
+  const lastPointerXRef = useRef(0);
+
   const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
     if (!enableDrag) return;
     e.stopPropagation();
     (e.target as HTMLElement)?.setPointerCapture?.(e.pointerId);
+
+    // Shift-click → rotate mode. Plain click → move mode. The rotate mode
+    // converts horizontal pointer travel to radians of in-plane rotation.
+    const isShift = (e.nativeEvent as PointerEvent).shiftKey;
+    if (isShift) {
+      rotatingRef.current = true;
+      lastPointerXRef.current = e.clientX;
+      onDragChange(true);
+      document.body.style.cursor = "ew-resize";
+      return;
+    }
+
     draggingRef.current = true;
     onDragChange(true);
     document.body.style.cursor = "grabbing";
@@ -143,6 +167,16 @@ function Model({
   };
 
   const handlePointerMove = (e: ThreeEvent<PointerEvent>) => {
+    if (rotatingRef.current) {
+      e.stopPropagation();
+      const dx = e.clientX - lastPointerXRef.current;
+      lastPointerXRef.current = e.clientX;
+      // 200px of horizontal travel = one full rotation (2π). Feels natural
+      // on both desktop trackpads and mobile finger sweeps.
+      const delta = (dx / 200) * Math.PI * 2;
+      if (delta !== 0) onActiveLayerRotate(delta);
+      return;
+    }
     if (!draggingRef.current) return;
     e.stopPropagation();
     const t = transformFromHit(e);
@@ -150,6 +184,13 @@ function Model({
   };
 
   const endDrag = (e: ThreeEvent<PointerEvent>) => {
+    if (rotatingRef.current) {
+      rotatingRef.current = false;
+      onDragChange(false);
+      (e.target as HTMLElement)?.releasePointerCapture?.(e.pointerId);
+      document.body.style.cursor = enableDrag ? "grab" : "auto";
+      return;
+    }
     if (!draggingRef.current) return;
     draggingRef.current = false;
     onDragChange(false);
@@ -158,10 +199,20 @@ function Model({
   };
 
   const handlePointerOver = () => {
-    if (enableDrag && !draggingRef.current) document.body.style.cursor = "grab";
+    if (enableDrag && !draggingRef.current && !rotatingRef.current) document.body.style.cursor = "grab";
   };
   const handlePointerOut = () => {
-    if (!draggingRef.current) document.body.style.cursor = "auto";
+    if (!draggingRef.current && !rotatingRef.current) document.body.style.cursor = "auto";
+  };
+
+  // Wheel-over-body resizes the active layer. Stops the event from also
+  // dolly-ing the camera (OrbitControls would otherwise eat it).
+  const handleWheel = (e: ThreeEvent<WheelEvent>) => {
+    if (!enableDrag) return;
+    e.stopPropagation();
+    // Scroll up = bigger, scroll down = smaller. 1.05/0.95 = ~5% per tick.
+    const factor = e.deltaY < 0 ? 1.05 : 0.95;
+    onActiveLayerScale(factor);
   };
 
   // Identify the "body" mesh — the largest mesh in the scene that carries the
@@ -212,6 +263,7 @@ function Model({
             onPointerLeave={isBody ? endDrag : undefined}
             onPointerOver={isBody ? handlePointerOver : undefined}
             onPointerOut={isBody ? handlePointerOut : undefined}
+            onWheel={isBody ? handleWheel : undefined}
           >
             {isBody && layers.map((layer) => {
               // The active layer is the one the user is currently dragging,
@@ -345,6 +397,11 @@ interface Product3DViewerProps {
    * the parent persist the new position/rotation back into the layer model.
    */
   onLayerDrag?: (placementId: string, t: { position: [number, number, number]; rotation: [number, number, number] }) => void;
+  /** Fired on wheel-over-body for the active layer. `factor` is multiplicative
+   *  (e.g. 1.05 = grow 5%, 0.95 = shrink 5%). Parent clamps to sensible bounds. */
+  onLayerScale?: (placementId: string, factor: number) => void;
+  /** Fired on shift-drag rotation. `deltaRadians` is incremental. */
+  onLayerRotate?: (placementId: string, deltaRadians: number) => void;
 }
 
 /** Imperative API exposed via ref. Lets the parent grab a PNG snapshot of the
@@ -377,6 +434,8 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
   designImageUrl,
   layers,
   onLayerDrag,
+  onLayerScale,
+  onLayerRotate,
 }, ref) {
   // Wrapper ref — used to find the underlying canvas DOM for snapshots.
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -653,6 +712,12 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
               }}
               enableDrag={!!activePlacement && renderedLayers.some((l) => l.placementId === activePlacement)}
               onDragChange={setIsDraggingDecal}
+              onActiveLayerScale={(factor) => {
+                if (activePlacement && onLayerScale) onLayerScale(activePlacement, factor);
+              }}
+              onActiveLayerRotate={(delta) => {
+                if (activePlacement && onLayerRotate) onLayerRotate(activePlacement, delta);
+              }}
             />
           </Center>
           <CameraRig activePlacement={activePlacement} cinematic={cinematic} />
