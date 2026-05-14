@@ -1,26 +1,25 @@
 import { Suspense, useEffect, useRef, useMemo, useState, useCallback, forwardRef, useImperativeHandle } from "react";
 import { Canvas, useFrame, type ThreeEvent } from "@react-three/fiber";
-import { OrbitControls, useGLTF, Center, Html, useProgress, Decal, Environment, ContactShadows } from "@react-three/drei";
+import { OrbitControls, useGLTF, Center, Html, useProgress, Environment, ContactShadows } from "@react-three/drei";
 import * as THREE from "three";
 import { Minus, Plus, Maximize2, Sparkles, Move } from "lucide-react";
 
 /** Single source of truth for the default model path. */
 export const DEFAULT_MODEL_PATH = "/3d/white-tshirt.glb";
 
-interface DecalTransform {
+/** Resolved transform for a placement, used to position a flat plane mesh
+ *  on the garment surface. Switched from <Decal> cube projection (which was
+ *  silently failing on 3 of 4 placements) to a plane mesh — guaranteed to
+ *  render, and move/resize/rotate become direct transforms on the plane. */
+interface PlacementTransform {
+  /** Plane center position in mesh-local space (same space as GLB vertices). */
   position: [number, number, number];
-  /** Explicit Euler [x, y, z] for the projection cube's orientation. We
-   *  used to pass a single number and rely on drei's auto-orient to align
-   *  the cube with the closest vertex normal, but on our authored GLBs
-   *  the chest-area vertex normals point in unexpected directions (seam
-   *  averaging quirks), so the cube ended up oriented sideways and the
-   *  projection missed the front face. Passing an explicit Euler lets us
-   *  hard-orient the cube to face the right way out of the garment. */
+  /** Euler [x, y, z] orienting the plane so its face points outward from
+   *  the garment surface at this placement. */
   rotation: [number, number, number];
-  /** Vector scale: [width, height, depth-of-projection]. The depth is how
-   *  far through the mesh the projection cube extends; keep it small so a
-   *  front-placed decal doesn't also paint the back side of the garment. */
-  scale: [number, number, number];
+  /** Plane width in world units. Height is set equal to width by default
+   *  (square aspect), unless the user resizes asymmetrically. */
+  width: number;
 }
 
 /**
@@ -96,16 +95,19 @@ interface BodyBounds {
   max: THREE.Vector3;
 }
 
-/** Resolve a placement to absolute mesh-local coordinates using ONLY the
- *  body bbox. No raycasting — raycasts were missing for 3 of 4 placements
- *  on the authored GLBs (the rays passed through the neck opening or
- *  glanced off the curved sleeve). This bbox-only path always produces a
- *  valid position, and DecalGeometry's cube projection is forgiving
- *  enough that small position offsets still capture the surface. */
+/** Resolve a placement preset to a flat plane transform on the body mesh.
+ *  The plane is positioned slightly OFF the surface in the outward direction
+ *  (small offset to avoid z-fighting with the fabric), oriented to face the
+ *  camera direction for that placement.
+ *
+ *  We use bbox-derived positions because raycasting against the body mesh
+ *  was unreliable on these specific authored GLBs. The bbox-only approach
+ *  always produces a valid position regardless of the model's internal
+ *  geometry quirks. */
 function resolvePlacement(
   id: string | undefined,
   bounds: BodyBounds | null,
-): DecalTransform | null {
+): PlacementTransform | null {
   if (!id || !bounds) return null;
   const preset = getPlacementPreset(id);
   if (!preset) return null;
@@ -114,82 +116,46 @@ function resolvePlacement(
   const sizeY = bounds.max.y - bounds.min.y;
   const sizeZ = bounds.max.z - bounds.min.z;
   const cx = (bounds.min.x + bounds.max.x) / 2;
+  const yPos = bounds.min.y + preset.yN * sizeY;
+
+  // Tiny outward offset so the plane sits *just* above the fabric surface
+  // without z-fighting. The fabric mesh is thin so even a small gap reads
+  // as "stuck to the shirt" from typical viewing distances.
+  const surfaceOffset = Math.max(sizeX, sizeY, sizeZ) * 0.003;
 
   const isSleeve = id === "left_sleeve" || id === "right_sleeve";
 
-  // Y position — preset.yN is 0..1 normalised from the bbox bottom (hem) to top.
-  const yPos = bounds.min.y + preset.yN * sizeY;
-
-  // X / Z position depends on which face the placement targets:
-  //   - Front chest:  cube faces +Z, sits just in front of the front surface
-  //   - Back:         cube faces -Z, sits just behind the back surface
-  //   - Sleeves:      cube faces ±X, sits just outside the sleeve cuff
-  // The Euler rotation hard-orients the cube's local +Z axis along the
-  // surface normal direction. This avoids drei's auto-orient picking a
-  // wrong-direction vertex normal on chest-seam vertices.
   let xPos: number;
   let zPos: number;
   let rotation: [number, number, number];
-  const zOvershoot = sizeZ * 0.1;
-  const xOvershoot = sizeX * 0.06;
 
-  // ⚠️ Rotation values are COUNTER-INTUITIVE for DecalGeometry. The "rotation"
-  // is the projector cube's orientation, and clipping rejects triangles whose
-  // winding/normals don't match the projection direction. Front-facing
-  // triangles need a projector rotated 180° around Y (so the cube's effective
-  // forward direction matches the surface-normal direction at the chest).
-  // Back-facing triangles need the opposite. The "Back works, Front doesn't"
-  // symptom was the original Front rotation `[0,0,0]` being wrong.
   if (isSleeve) {
-    xPos = cx + preset.xN * (sizeX / 2 + xOvershoot);
-    // Sleeves project along ±X. The body center Z (0 for these GLBs) is a
-    // safe Z to anchor at since the sleeve geometry passes through there.
+    // Sleeve plane: positioned at the outer edge of the body bbox + a small
+    // outward offset, rotated 90° around Y so its face points sideways.
+    xPos = cx + preset.xN * (sizeX / 2 + surfaceOffset);
     zPos = 0;
-    // Sleeve rotations inverted vs my earlier guess — left sleeve cube
-    // points toward -X (into the body), right sleeve toward +X.
     rotation = preset.xN > 0
-      ? [0, -Math.PI / 2, preset.rollZ ?? 0]   // left sleeve
-      : [0,  Math.PI / 2, preset.rollZ ?? 0];  // right sleeve
+      ? [0,  Math.PI / 2, preset.rollZ ?? 0]   // left sleeve (faces +X)
+      : [0, -Math.PI / 2, preset.rollZ ?? 0];  // right sleeve (faces -X)
   } else if (preset.zN === 1) {
-    // Front chest: projector positioned in front, rotated 180° around Y so
-    // its +Z effective direction matches the front-face normal direction.
+    // Front chest: plane in front of the front surface, default Euler
+    // makes a <planeGeometry>'s face point toward +Z, which matches the
+    // outward-facing direction at the chest. No rotation needed.
     xPos = cx + preset.xN * (sizeX / 2);
-    zPos = bounds.max.z + zOvershoot;
-    rotation = [0, Math.PI, preset.rollZ ?? 0];
-  } else {
-    // Back: projector positioned behind, identity rotation (its +Z naturally
-    // matches the back-face normal direction in this GLB's coordinate frame).
-    xPos = cx + preset.xN * (sizeX / 2);
-    zPos = bounds.min.z - zOvershoot;
+    zPos = bounds.max.z + surfaceOffset;
     rotation = [0, 0, preset.rollZ ?? 0];
+  } else {
+    // Back: plane behind the back surface, rotated 180° around Y so the
+    // plane's face points outward (toward -Z) instead of into the body.
+    xPos = cx + preset.xN * (sizeX / 2);
+    zPos = bounds.min.z - surfaceOffset;
+    rotation = [0, Math.PI, preset.rollZ ?? 0];
   }
-
-  // Cube width/height — bbox-fraction-based so decals stay proportional
-  // across different garments.
-  const width = sizeX * preset.scaleN;
-  // Cube depth — KEEP THIS SMALL. Large depths cause DecalGeometry clipping
-  // failures on thin cloth meshes (the cube extends past the fabric on both
-  // sides and the projection produces no triangles). 0.02 = 2cm of model
-  // space, enough for fabric thickness without crossing to the other side.
-  const depth = 0.02;
 
   return {
     position: [xPos, yPos, zPos],
     rotation,
-    scale: [width, width, depth],
-  };
-}
-
-/** Legacy export retained for callers that only check "is this on the back?".
- *  Callers that actually render a decal should use `resolvePlacement` so
- *  coordinates match the actual body mesh's bbox. */
-export function getPlacementProps(id?: string): DecalTransform | null {
-  const preset = getPlacementPreset(id);
-  if (!preset) return null;
-  return {
-    position: [preset.xN * 0.15, 0.05, preset.zN === 1 ? 0.15 : -0.15],
-    rotation: [0, preset.zN === 1 ? 0 : Math.PI, preset.rollZ ?? 0],
-    scale: [0.2, 0.2, 0.15],
+    width: sizeX * preset.scaleN,
   };
 }
 
@@ -404,28 +370,10 @@ function Model({
     onActiveLayerScale(factor);
   };
 
-  // Debug mode: append ?debug=1 to the URL to visualise the projector cubes
-  // as red wireframes. Reveals decal direction + clipping volume at a glance.
-  const debugMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("debug") === "1";
-
   return (
     <group ref={groupRef}>
-      {/* Debug: render every placement's projector cube as a red wireframe
-          so we can see where each one is positioned and which way it faces. */}
-      {debugMode && bodyBounds && (
-        <>
-          {(["front_chest", "back", "left_sleeve", "right_sleeve"] as const).map((id) => {
-            const preset = resolvePlacement(id, bodyBounds);
-            if (!preset) return null;
-            return (
-              <mesh key={`debug-${id}`} position={preset.position} rotation={preset.rotation}>
-                <boxGeometry args={preset.scale} />
-                <meshBasicMaterial wireframe color={id === "front_chest" ? "#ff0000" : id === "back" ? "#00ff00" : id === "left_sleeve" ? "#0000ff" : "#ffff00"} />
-              </mesh>
-            );
-          })}
-        </>
-      )}
+      {/* Body meshes — every GLB mesh rendered as-is. The body mesh itself
+          handles pointer events for the drag-to-move-design behaviour. */}
       {Object.entries(nodes).map(([name, node]: [string, any]) => {
         if (!node.isMesh) return null;
         const isBody = name === bodyMeshName;
@@ -434,7 +382,6 @@ function Model({
             key={name}
             geometry={node.geometry}
             material={node.material}
-            renderOrder={1}
             castShadow
             receiveShadow
             onPointerDown={isBody ? handlePointerDown : undefined}
@@ -445,76 +392,77 @@ function Model({
             onPointerOver={isBody ? handlePointerOver : undefined}
             onPointerOut={isBody ? handlePointerOut : undefined}
             onWheel={isBody ? handleWheel : undefined}
-          >
-            {isBody && layers.map((layer) => {
-              const preset = resolvePlacement(layer.placementId, bodyBounds);
-              if (!preset) return null;
-              const isActive = layer.placementId === activePlacement;
-              const finalPos = (isActive && customDecal?.position) ?? layer.customPosition ?? preset.position;
-              // Rotation: preset gives the cube's base orientation (so it
-              // faces the right way out of the garment). User's customRotation
-              // is in-plane Z-roll layered on top of that base orientation.
-              const userRoll = layer.customRotation ?? 0;
-              const finalRot: [number, number, number] = [
-                preset.rotation[0],
-                preset.rotation[1],
-                preset.rotation[2] + userRoll,
-              ];
-              // User-applied scale slider value (single number) replaces the
-              // visible width/height but keeps the preset's projection depth
-              // so the back-bleed protection isn't lost when resizing.
-              const finalScale: [number, number, number] = layer.customScale !== undefined
-                ? [layer.customScale, layer.customScale, preset.scale[2]]
-                : preset.scale;
-              return (
-                <Decal
-                  key={layer.id}
-                  position={finalPos as any}
-                  rotation={finalRot as any}
-                  scale={finalScale as any}
-                  map={layer.texture}
-                >
-                  <meshStandardMaterial
-                    map={layer.texture}
-                    transparent
-                    polygonOffset
-                    polygonOffsetFactor={-1}
-                    depthTest
-                    depthWrite={false}
-                    side={THREE.DoubleSide}
-                  />
-                </Decal>
-              );
-            })}
+          />
+        );
+      })}
 
-            {/* When there's no layer for the active placement, render a faded
-                placeholder so the user knows where the design will land. */}
-            {isBody && activePlacement && !layers.some(l => l.placementId === activePlacement) && (() => {
-              const preset = resolvePlacement(activePlacement, bodyBounds);
-              if (!preset) return null;
-              return (
-                <Decal
-                  position={preset.position as any}
-                  rotation={preset.rotation as any}
-                  scale={preset.scale as any}
-                  map={uploadTexture}
-                >
-                  <meshStandardMaterial
-                    map={uploadTexture}
-                    transparent
-                    opacity={0.55}
-                    polygonOffset
-                    polygonOffsetFactor={-1}
-                    depthTest
-                    depthWrite={false}
-                    side={THREE.DoubleSide}
-                  />
-                </Decal>
-              );
-            })()}
+      {/* Design layers — each rendered as a flat plane mesh positioned on
+          the garment surface. This is the post-Decal architecture: <Decal>
+          was silently failing for 3 of 4 placements on these GLBs, so we
+          replaced it with a simpler "sticker on surface" approach that's
+          guaranteed to render. Move/resize/rotate are direct transforms on
+          the plane mesh, no projection math involved. */}
+      {bodyBounds && layers.map((layer) => {
+        const preset = resolvePlacement(layer.placementId, bodyBounds);
+        if (!preset) return null;
+        const isActive = layer.placementId === activePlacement;
+        // Drag-on-active-layer overrides preset position; otherwise the
+        // layer's stored custom position (set from a previous drag) wins.
+        const position: [number, number, number] =
+          (isActive ? customDecal?.position : undefined) ?? layer.customPosition ?? preset.position;
+        // Roll is layered on top of the placement's base outward-facing rotation.
+        const userRoll = layer.customRotation ?? 0;
+        const rotation: [number, number, number] = [
+          preset.rotation[0],
+          preset.rotation[1],
+          preset.rotation[2] + userRoll,
+        ];
+        const width = layer.customScale ?? preset.width;
+        return (
+          <mesh
+            key={layer.id}
+            position={position}
+            rotation={rotation}
+            renderOrder={2}
+          >
+            <planeGeometry args={[width, width]} />
+            <meshBasicMaterial
+              map={layer.texture}
+              transparent
+              alphaTest={0.01}
+              side={THREE.DoubleSide}
+              depthWrite={false}
+              toneMapped={false}
+            />
           </mesh>
         );
       })}
+
+      {/* Placeholder — faded "Upload design" dashed-circle for the active
+          placement when nothing is applied there yet, so the user knows
+          where their next design will land. */}
+      {bodyBounds && activePlacement && !layers.some(l => l.placementId === activePlacement) && (() => {
+        const preset = resolvePlacement(activePlacement, bodyBounds);
+        if (!preset) return null;
+        return (
+          <mesh
+            position={preset.position}
+            rotation={preset.rotation}
+            renderOrder={2}
+          >
+            <planeGeometry args={[preset.width, preset.width]} />
+            <meshBasicMaterial
+              map={uploadTexture}
+              transparent
+              opacity={0.55}
+              alphaTest={0.01}
+              side={THREE.DoubleSide}
+              depthWrite={false}
+              toneMapped={false}
+            />
+          </mesh>
+        );
+      })()}
     </group>
   );
 }
