@@ -1,10 +1,10 @@
-import { ArrowLeft, Sparkles, Upload, Image as ImageIcon, Type, Layers, ChevronRight, ShoppingBag, Minus, Plus, RotateCw, Box, Glasses, User, X, Undo2, Redo2, Save, Share2, Heart } from "lucide-react";
+import { ArrowLeft, Sparkles, Upload, Image as ImageIcon, Type, Layers, ChevronRight, ShoppingBag, Minus, Plus, RotateCw, Box, Glasses, User, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router";
 import { Suspense, useEffect, useMemo, useRef, useState, Component, ReactNode, lazy } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { findProduct, products } from "./products";
 import type { SizeCode } from "./products";
-import type { Product3DViewerHandle, DesignLayer } from "./Product3DViewer";
+import type { Product3DViewerHandle } from "./Product3DViewer";
 const Product3DViewer = lazy(() => import("./Product3DViewer"));
 // Inlined so we don't pull the 3D module into this page's static graph. The
 // canonical value still lives in Product3DViewer.tsx; keep them in sync.
@@ -83,86 +83,16 @@ function CustomizePageInner({
 
   const [activeTool, setActiveTool] = useState<ToolId>("ai");
   const [selectedColor, setSelectedColor] = useState(product.colors[0].name);
-  // Trim color picker — independent of body color. `null` means "match body"
-  // which keeps the legacy one-color appearance for users who don't engage.
-  const [trimColor, setTrimColor] = useState<string | null>(null);
   const [selectedSize, setSelectedSize] = useState(product.sizes[0]);
   const [quantity, setQuantity] = useState(product.moq || 25);
   const [zoom, setZoom] = useState(100);
   const [resetSignal, setResetSignal] = useState(0);
 
-  // Per-placement design layers. Each placement holds at most one layer;
-  // applying a new design to a placement replaces its previous layer.
-  const [layers, setLayersRaw] = useState<DesignLayer[]>([]);
-
-  // ─── Undo / redo history ─────────────────────────────────────────────
-  // We snapshot the layers array on every committed change. Continuous
-  // gestures (wheel-resize, shift-rotate, drag-move) push one frame per
-  // event, which gives the user fine-grained step-back. Stack is capped at
-  // 60 entries so memory doesn't grow unbounded for long sessions.
-  const historyRef = useRef<DesignLayer[][]>([[]]);
-  const historyIndexRef = useRef(0);
-  const [historyVersion, setHistoryVersion] = useState(0);
-  const HISTORY_MAX = 60;
-
-  const setLayers = (next: React.SetStateAction<DesignLayer[]>) => {
-    setLayersRaw((prev) => {
-      const resolved = typeof next === "function" ? (next as (p: DesignLayer[]) => DesignLayer[])(prev) : next;
-      // Drop any "future" frames (post-undo edit) before appending.
-      const truncated = historyRef.current.slice(0, historyIndexRef.current + 1);
-      truncated.push(resolved);
-      // Cap the stack — keep the most recent HISTORY_MAX frames.
-      const capped = truncated.length > HISTORY_MAX
-        ? truncated.slice(truncated.length - HISTORY_MAX)
-        : truncated;
-      historyRef.current = capped;
-      historyIndexRef.current = capped.length - 1;
-      setHistoryVersion((v) => v + 1);
-      return resolved;
-    });
-  };
-
-  const canUndo = historyIndexRef.current > 0;
-  const canRedo = historyIndexRef.current < historyRef.current.length - 1;
-  void historyVersion; // keep the derived booleans fresh
-
-  const undo = () => {
-    if (historyIndexRef.current <= 0) return;
-    historyIndexRef.current -= 1;
-    setLayersRaw(historyRef.current[historyIndexRef.current]);
-    setHistoryVersion((v) => v + 1);
-  };
-
-  const redo = () => {
-    if (historyIndexRef.current >= historyRef.current.length - 1) return;
-    historyIndexRef.current += 1;
-    setLayersRaw(historyRef.current[historyIndexRef.current]);
-    setHistoryVersion((v) => v + 1);
-  };
+  // AI design generation — text prompt → graphic image → applied as decal.
+  const [designUrl, setDesignUrl] = useState<string | null>(null);
   const [designBusy, setDesignBusy] = useState(false);
   const [designError, setDesignError] = useState<string | null>(null);
   const aiAvailable = isDesignGenConfigured();
-
-  /** Upsert a layer at the active placement. Replaces an existing layer at
-   *  the same placement so users get the obvious "newest wins" behaviour. */
-  const applyLayerAtActivePlacement = (
-    imageUrl: string,
-    source: DesignLayer["source"],
-  ) => {
-    setLayers((prev) => {
-      const without = prev.filter((l) => l.placementId !== activePlacement);
-      const layer: DesignLayer = {
-        id: `${activePlacement}-${Date.now()}`,
-        placementId: activePlacement,
-        imageUrl,
-        source,
-      };
-      return [...without, layer];
-    });
-  };
-
-  /** Single representative image for the cart thumbnail / draft summary. */
-  const primaryDesignUrl: string | null = layers[layers.length - 1]?.imageUrl ?? null;
 
   // Immersive view modals (mirrored from PDP)
   const [arOpen, setArOpen] = useState(false);
@@ -177,7 +107,7 @@ function CustomizePageInner({
     // Use the rendered 3D scene only when the customer has actually applied
     // a design. Otherwise the marketing photo is sharper and more useful to
     // the model.
-    const snapshot = layers.length > 0 ? viewer3DRef.current?.snapshot() : null;
+    const snapshot = designUrl ? viewer3DRef.current?.snapshot() : null;
     setTryOnImage(snapshot ?? product.image);
     setTryOnOpen(true);
   };
@@ -192,7 +122,7 @@ function CustomizePageInner({
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === "string") {
-        applyLayerAtActivePlacement(reader.result, "upload");
+        setDesignUrl(reader.result);
         track("design_generated", { product: product.name, source: "upload" });
       }
     };
@@ -278,213 +208,32 @@ function CustomizePageInner({
       octx.fillStyle = "#0a0a0a";
       octx.fillRect(0, 0, out.width, out.height);
       octx.drawImage(canvas, 0, 0);
-      applyLayerAtActivePlacement(out.toDataURL("image/png"), "text");
+      setDesignUrl(out.toDataURL("image/png"));
     } else {
-      applyLayerAtActivePlacement(canvas.toDataURL("image/png"), "text");
+      setDesignUrl(canvas.toDataURL("image/png"));
     }
     track("design_generated", { product: product.name, source: "text" });
   };
 
   const applyStockDesign = (url: string) => {
-    applyLayerAtActivePlacement(url, "stock");
+    setDesignUrl(url);
     track("design_generated", { product: product.name, source: "stock" });
   };
 
-  // Simplified to 4 design zones. Two-color trim (collar / neck / cuffs /
-  // hem) is handled separately by the body+trim color pickers in the
-  // ConfigDock — not a design placement.
   const placements = [
-    { id: "front_chest",  label: "Front chest" },
-    { id: "back",         label: "Back" },
-    { id: "left_sleeve",  label: "Left hand" },
-    { id: "right_sleeve", label: "Right hand" },
+    { id: "chest_left", label: "Left chest" },
+    { id: "chest_center", label: "Center chest" },
+    { id: "large_center", label: "Large center", badge: "New", badgeType: "primary" },
+    { id: "sleeve_left_top", label: "Left sleeve top" },
+    { id: "sleeve_right_top", label: "Right sleeve top" },
+    { id: "back", label: "Back", badges: [{ text: "DTG", type: "default" }, { text: "New", type: "primary" }] },
+    { id: "label_outside", label: "Outside label", badges: [{ text: "DTG", type: "default" }] },
+    { id: "label_inside", label: "Inside label", badges: [{ text: "DTG", type: "default" }] },
   ];
   const [activePlacement, setActivePlacement] = useState(placements[0].id);
 
   const activeColor = product.colors.find((c) => c.name === selectedColor) ?? product.colors[0];
-
-  // ─── Pricing model (Slice 5) ───────────────────────────────────────────
-  // Mirrors common screen-print / embroidery / DTG markups. Surcharges are
-  // additive on top of the base product price; quantity multiplies the
-  // per-unit total, not the surcharges (a 12-unit order pays for printing
-  // 12 times). Two-color trim is a one-time setup fee.
-  const PLACEMENT_SURCHARGE: Record<string, number> = {
-    front_chest: 6,
-    back: 8,
-    left_sleeve: 4,
-    right_sleeve: 4,
-  };
-  const TRIM_SURCHARGE = trimColor ? 3 : 0;
-
-  const layerSurchargesPerUnit = layers
-    .filter((l) => !l.hidden)
-    .reduce((sum, l) => sum + (PLACEMENT_SURCHARGE[l.placementId] ?? 0), 0);
-  const perUnitPrice = product.price + layerSurchargesPerUnit;
-  const subtotalDesigns = perUnitPrice * quantity;
-  const totalPrice = subtotalDesigns + TRIM_SURCHARGE;
-
-  // Itemised breakdown for the popover. Built once per render off the same
-  // data the total is built from so they're guaranteed in sync.
-  const priceLines = useMemo(() => {
-    const lines: Array<{ label: string; amount: number; note?: string }> = [
-      { label: "Base", amount: product.price * quantity, note: `${quantity} × $${product.price}` },
-    ];
-    if (layerSurchargesPerUnit > 0) {
-      const visible = layers.filter((l) => !l.hidden);
-      visible.forEach((l) => {
-        const ph = placements.find((p) => p.id === l.placementId);
-        const surcharge = PLACEMENT_SURCHARGE[l.placementId] ?? 0;
-        if (surcharge > 0) {
-          lines.push({
-            label: ph?.label ?? l.placementId,
-            amount: surcharge * quantity,
-            note: `$${surcharge} × ${quantity}`,
-          });
-        }
-      });
-    }
-    if (TRIM_SURCHARGE > 0) {
-      lines.push({ label: "Two-color trim setup", amount: TRIM_SURCHARGE, note: "one-time" });
-    }
-    return lines;
-  }, [product.price, quantity, layers, layerSurchargesPerUnit, TRIM_SURCHARGE, placements]);
-
-  const [breakdownOpen, setBreakdownOpen] = useState(false);
-
-  // ─── Saved designs library (Slice 6) ─────────────────────────────────
-  // Designs are stored in localStorage under a global key keyed by a short
-  // id. Same browser → loads instantly. Different device → we show a clear
-  // "this design isn't available on this device" message because we don't
-  // have a backend yet.
-  type SavedDesignRecord = {
-    id: string;
-    productId: string;
-    name: string;
-    color: string;
-    trimColor: string | null;
-    size: string;
-    quantity: number;
-    placement: string;
-    layers: DesignLayer[];
-    thumbnail: string | null;
-    savedAt: string;
-  };
-  const SAVED_KEY = "hoodude.savedDesigns.v1";
-
-  const readSavedDesigns = (): SavedDesignRecord[] => {
-    try {
-      const raw = window.localStorage.getItem(SAVED_KEY);
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  };
-
-  const [savedDesigns, setSavedDesigns] = useState<SavedDesignRecord[]>(() => readSavedDesigns());
-  const [libraryOpen, setLibraryOpen] = useState(false);
-
-  const generateShortId = () =>
-    Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-
-  const saveCurrentDesign = (name?: string) => {
-    const id = generateShortId();
-    const thumbnail = viewer3DRef.current?.snapshot() ?? null;
-    const record: SavedDesignRecord = {
-      id,
-      productId: product.id,
-      name: name || `${product.name} · ${new Date().toLocaleDateString()}`,
-      color: activeColor.name,
-      trimColor,
-      size: selectedSize,
-      quantity,
-      placement: activePlacement,
-      layers,
-      thumbnail,
-      savedAt: new Date().toISOString(),
-    };
-    const next = [record, ...readSavedDesigns()].slice(0, 30); // cap to 30 saves
-    try {
-      window.localStorage.setItem(SAVED_KEY, JSON.stringify(next));
-      setSavedDesigns(next);
-      track("customize_save_design", { product_id: product.id, layer_count: layers.length });
-      toast.success("Design saved to your library", {
-        description: "Find it under 'My designs' on this device.",
-      });
-      return id;
-    } catch {
-      toast.error("Couldn't save", { description: "Storage is full. Remove old designs first." });
-      return null;
-    }
-  };
-
-  const loadSavedDesign = (record: SavedDesignRecord) => {
-    if (record.productId !== product.id) {
-      toast.error("Different product", {
-        description: "That saved design was for a different garment.",
-      });
-      return;
-    }
-    if (product.colors.some((c) => c.name === record.color)) setSelectedColor(record.color);
-    if (record.trimColor && product.colors.some((c) => c.name === record.trimColor)) {
-      setTrimColor(record.trimColor);
-    } else if (!record.trimColor) {
-      setTrimColor(null);
-    }
-    if (product.sizes.includes(record.size as SizeCode)) setSelectedSize(record.size as SizeCode);
-    if (typeof record.quantity === "number" && record.quantity > 0) setQuantity(record.quantity);
-    if (placements.some((p) => p.id === record.placement)) setActivePlacement(record.placement);
-    setLayers(record.layers);
-    setLibraryOpen(false);
-    toast.success(`Loaded "${record.name}"`);
-  };
-
-  const removeSavedDesign = (id: string) => {
-    const next = readSavedDesigns().filter((r) => r.id !== id);
-    try {
-      window.localStorage.setItem(SAVED_KEY, JSON.stringify(next));
-      setSavedDesigns(next);
-    } catch { /* ignore */ }
-  };
-
-  // Share URL — encodes the saved-design id in a query param so reload-by-
-  // link works on the same device. Auto-loads on mount if the id resolves
-  // to a saved record.
-  const shareCurrentDesign = async () => {
-    const id = saveCurrentDesign();
-    if (!id) return;
-    const url = `${window.location.origin}/customize?id=${product.id}&d=${id}`;
-    try {
-      // Native share sheet on mobile; falls back to clipboard otherwise.
-      if (navigator.share) {
-        await navigator.share({ title: "My HOODUDE design", url });
-      } else {
-        await navigator.clipboard.writeText(url);
-        toast.success("Link copied", {
-          description: "Same-browser shares only — open the link on this device to restore the design.",
-        });
-      }
-    } catch {
-      // User cancelled share — keep the design saved, that's still useful.
-    }
-  };
-
-  // On mount, if URL has ?d=<id>, try to load that saved design.
-  useEffect(() => {
-    const sp = new URLSearchParams(window.location.search);
-    const sharedId = sp.get("d");
-    if (!sharedId) return;
-    const record = readSavedDesigns().find((r) => r.id === sharedId);
-    if (record && record.productId === product.id) {
-      loadSavedDesign(record);
-    } else if (sharedId) {
-      toast("Design not on this device", {
-        description: "Shared designs are saved locally. Open the link on the device where you created it.",
-      });
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const totalPrice = product.price * quantity;
 
   const DRAFT_KEY = `hoodude.customize.draft.${product.id}`;
 
@@ -495,21 +244,13 @@ function CustomizePageInner({
       if (!raw) return;
       const draft = JSON.parse(raw) as {
         color?: string;
-        trimColor?: string | null;
         size?: string;
         quantity?: number;
         placement?: string;
-        // New (multi-layer) format
-        layers?: DesignLayer[];
-        // Legacy (single-design) format — kept for back-compat with drafts
-        // saved before slice-1 introduced per-placement layers.
         designUrl?: string | null;
       };
       if (draft.color && product.colors.some((c) => c.name === draft.color)) {
         setSelectedColor(draft.color);
-      }
-      if (draft.trimColor && product.colors.some((c) => c.name === draft.trimColor)) {
-        setTrimColor(draft.trimColor);
       }
       if (draft.size && product.sizes.includes(draft.size as SizeCode)) {
         setSelectedSize(draft.size as SizeCode);
@@ -520,19 +261,7 @@ function CustomizePageInner({
       if (draft.placement && placements.some((p) => p.id === draft.placement)) {
         setActivePlacement(draft.placement);
       }
-      if (Array.isArray(draft.layers) && draft.layers.length > 0) {
-        // New draft format — multiple per-placement layers preserved verbatim.
-        setLayers(draft.layers as DesignLayer[]);
-      } else if (draft.designUrl) {
-        // Legacy draft format from before multi-layer support — fall back to a
-        // single layer at the saved placement.
-        setLayers([{
-          id: `${draft.placement ?? activePlacement}-legacy`,
-          placementId: draft.placement ?? activePlacement,
-          imageUrl: draft.designUrl,
-          source: "upload",
-        }]);
-      }
+      if (draft.designUrl) setDesignUrl(draft.designUrl);
       toast("Draft restored", {
         description: "We brought back your last customization for this product.",
       });
@@ -544,37 +273,31 @@ function CustomizePageInner({
   }, [product.id]);
 
   const handleAddToCart = () => {
-    const hasCustom = layers.length > 0;
     addToCart({
-      // Each customized variant is its own cart line. Including a custom-
-      // suffix when there's at least one design ensures multiple distinct
-      // customizations of the same product/color/size stack as separate lines.
-      id: hasCustom
-        ? `${product.id}::${activeColor.name}::${selectedSize}::custom-${Date.now()}`
+      // Each customized variant is its own cart line — include placement and
+      // a hash of the design so users can stack multiple designs of the same
+      // product/color/size without them collapsing into one line.
+      id: designUrl
+        ? `${product.id}::${activeColor.name}::${selectedSize}::${activePlacement}::custom-${Date.now()}`
         : undefined,
       productId: product.id,
-      name: hasCustom ? `${product.name} · Custom` : product.name,
-      image: primaryDesignUrl ?? product.image,
+      name: designUrl ? `${product.name} · Custom` : product.name,
+      image: designUrl ?? product.image,
       color: activeColor.name,
       colorHex: activeColor.hex,
       size: selectedSize,
-      // Per-unit price includes placement print surcharges so the cart
-      // reflects what the user saw on the customize page. Trim setup is
-      // a one-time fee — folded into the first unit so the cart total
-      // still matches the customize total exactly.
-      price: perUnitPrice + (TRIM_SURCHARGE > 0 && quantity > 0 ? TRIM_SURCHARGE / quantity : 0),
+      price: product.price,
       quantity,
       maxStock: product.stock === "Make to Order" ? 200 : 50,
     });
     track("customize_add_to_cart", {
       product_id: product.id,
       placement: activePlacement,
-      has_design: hasCustom,
-      layer_count: layers.length,
+      has_design: Boolean(designUrl),
       quantity,
     });
     toast.success("Added to bag", {
-      description: `${product.name} · ${activeColor.name} · ${selectedSize} · ×${quantity}${hasCustom ? ` · ${layers.length} design${layers.length === 1 ? "" : "s"}` : ""}`,
+      description: `${product.name} · ${activeColor.name} · ${selectedSize} · ×${quantity}`,
     });
     onOpenCart();
   };
@@ -584,15 +307,14 @@ function CustomizePageInner({
       const draft = {
         productId: product.id,
         color: activeColor.name,
-        trimColor,
         size: selectedSize,
         quantity,
         placement: activePlacement,
-        layers,
+        designUrl,
         savedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
-      track("customize_save_draft", { product_id: product.id, layer_count: layers.length });
+      track("customize_save_draft", { product_id: product.id });
       toast.success("Draft saved", {
         description: "Pick up where you left off next time you open this product.",
       });
@@ -616,7 +338,7 @@ function CustomizePageInner({
         category: product.category,
         placement: activePlacement,
       });
-      applyLayerAtActivePlacement(result.imageDataUrl, "ai");
+      setDesignUrl(result.imageDataUrl);
       track("design_generated", { product: product.name, placement: activePlacement });
       // Auto-switch the sidebar to AI so the user knows where the design came
       // from. Subtle context-cue.
@@ -629,133 +351,10 @@ function CustomizePageInner({
     }
   };
 
-  /** Remove only the layer at the active placement (per-placement clear). */
-  const clearActivePlacementLayer = () => {
-    setLayers((prev) => prev.filter((l) => l.placementId !== activePlacement));
+  const clearDesign = () => {
+    setDesignUrl(null);
     setDesignError(null);
   };
-
-  /** Remove a specific layer by id (used by the Layers panel). */
-  const removeLayer = (layerId: string) => {
-    setLayers((prev) => prev.filter((l) => l.id !== layerId));
-  };
-
-  /** Toggle a layer's visibility without removing it (Layers panel eye icon). */
-  const toggleLayerHidden = (layerId: string) => {
-    setLayers((prev) => prev.map((l) => l.id === layerId ? { ...l, hidden: !l.hidden } : l));
-  };
-
-  /** Clear every layer at once. */
-  const clearAllLayers = () => {
-    setLayers([]);
-    setDesignError(null);
-  };
-
-  /** Selecting a layer in the Layers panel switches the active placement to it. */
-  const selectLayer = (layerId: string) => {
-    const layer = layers.find((l) => l.id === layerId);
-    if (layer) setActivePlacement(layer.placementId);
-  };
-
-  /** Backward-compat alias used by older call sites in this file. */
-  const clearDesign = clearActivePlacementLayer;
-
-  // ─── Per-layer transform editing (Slice 2) ────────────────────────────
-  // The "active layer" is the one at the current placement. These handlers
-  // mutate just that layer.
-  const MIN_SCALE = 0.04;
-  const MAX_SCALE = 0.8;
-
-  const updateActiveLayer = (mutator: (l: DesignLayer) => DesignLayer) => {
-    setLayers((prev) =>
-      prev.map((l) => (l.placementId === activePlacement ? mutator(l) : l)),
-    );
-  };
-
-  const scaleActiveLayer = (factor: number) => {
-    updateActiveLayer((l) => {
-      const current = l.scale ?? 0.2;
-      const next = Math.max(MIN_SCALE, Math.min(MAX_SCALE, current * factor));
-      return { ...l, scale: next };
-    });
-  };
-
-  const setActiveLayerScale = (scale: number) => {
-    updateActiveLayer((l) => ({ ...l, scale: Math.max(MIN_SCALE, Math.min(MAX_SCALE, scale)) }));
-  };
-
-  const rotateActiveLayer = (deltaRadians: number) => {
-    updateActiveLayer((l) => ({
-      ...l,
-      customRotation: (l.customRotation ?? 0) + deltaRadians,
-    }));
-  };
-
-  const setActiveLayerRotation = (radians: number) => {
-    updateActiveLayer((l) => ({ ...l, customRotation: radians }));
-  };
-
-  /** Snap the active layer back to the placement's preset position/scale/rotation. */
-  const resetActiveLayerTransform = () => {
-    updateActiveLayer((l) => ({
-      ...l,
-      customPosition: undefined,
-      customRotation: undefined,
-      scale: undefined,
-    }));
-  };
-
-  // The currently-edited layer (if any) and its effective transform values
-  // for the floating Properties panel.
-  const activeLayer = layers.find((l) => l.placementId === activePlacement) ?? null;
-
-  // ─── Keyboard shortcuts ────────────────────────────────────────────────
-  // Cmd/Ctrl+Z = undo · Cmd/Ctrl+Shift+Z (or Cmd/Ctrl+Y) = redo
-  // Delete/Backspace on the canvas (not in a text input) = remove active layer
-  // R = reset active layer's transform
-  // 1..8 = jump to placement at that index
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      // Skip when the user is typing in any input/textarea/contentEditable so
-      // we don't fight the prompt bar or text-design field.
-      const t = e.target as HTMLElement | null;
-      const tag = t?.tagName?.toLowerCase();
-      if (tag === "input" || tag === "textarea" || t?.isContentEditable) return;
-
-      const mod = e.metaKey || e.ctrlKey;
-      const k = e.key.toLowerCase();
-
-      if (mod && k === "z" && !e.shiftKey) {
-        e.preventDefault();
-        undo();
-        return;
-      }
-      if (mod && ((k === "z" && e.shiftKey) || k === "y")) {
-        e.preventDefault();
-        redo();
-        return;
-      }
-      if ((k === "delete" || k === "backspace") && activeLayer) {
-        e.preventDefault();
-        removeLayer(activeLayer.id);
-        return;
-      }
-      if (k === "r" && activeLayer && !mod) {
-        e.preventDefault();
-        resetActiveLayerTransform();
-        return;
-      }
-      // Number keys 1..8 jump to placement at that index.
-      const n = parseInt(k, 10);
-      if (!Number.isNaN(n) && n >= 1 && n <= placements.length && !mod) {
-        e.preventDefault();
-        setActivePlacement(placements[n - 1].id);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeLayer?.id, placements.length]);
 
   const sidebarTools: { id: ToolId; icon: ReactNode; label: string }[] = [
     { id: "ai", icon: <Sparkles size={17} strokeWidth={1.6} />, label: "AI" },
@@ -824,18 +423,11 @@ function CustomizePageInner({
               <ToolPanel
                 activeTool={activeTool}
                 product={product}
-                designUrl={primaryDesignUrl}
-                layers={layers}
-                placements={placements}
-                activePlacement={activePlacement}
-                onSelectLayer={selectLayer}
-                onToggleLayerHidden={toggleLayerHidden}
-                onRemoveLayer={removeLayer}
-                onClearAllLayers={clearAllLayers}
+                designUrl={designUrl}
                 onUpload={handleUploadClick}
                 onApplyStock={applyStockDesign}
                 onApplyText={applyTextDesign}
-                onClearDesign={clearActivePlacementLayer}
+                onClearDesign={() => setDesignUrl(null)}
                 onClose={() => setActiveTool("ai")}
               />
             </div>
@@ -877,18 +469,11 @@ function CustomizePageInner({
               <ToolPanel
                 activeTool={activeTool}
                 product={product}
-                designUrl={primaryDesignUrl}
-                layers={layers}
-                placements={placements}
-                activePlacement={activePlacement}
-                onSelectLayer={selectLayer}
-                onToggleLayerHidden={toggleLayerHidden}
-                onRemoveLayer={removeLayer}
-                onClearAllLayers={clearAllLayers}
+                designUrl={designUrl}
                 onUpload={handleUploadClick}
                 onApplyStock={applyStockDesign}
                 onApplyText={applyTextDesign}
-                onClearDesign={clearActivePlacementLayer}
+                onClearDesign={() => setDesignUrl(null)}
                 onClose={() => setActiveTool("ai")}
               />
             </motion.div>
@@ -925,128 +510,47 @@ function CustomizePageInner({
           </div>
 
           <div className="flex items-center gap-2">
-            {/* Undo / Redo — keyboard shortcuts (Cmd/Ctrl+Z and Shift) also
-                trigger these. Buttons are disabled-styled when their stack
-                edge is hit so users get visual feedback. */}
-            <div className="flex items-center mr-1 rounded-full bg-black/[0.04] p-0.5">
-              <button
-                onClick={undo}
-                disabled={!canUndo}
-                aria-label="Undo (Cmd+Z)"
-                title="Undo (Cmd+Z)"
-                className="size-8 rounded-full flex items-center justify-center text-fg-mute enabled:hover:text-fg enabled:hover:bg-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                <Undo2 size={14} strokeWidth={1.8} />
-              </button>
-              <button
-                onClick={redo}
-                disabled={!canRedo}
-                aria-label="Redo (Cmd+Shift+Z)"
-                title="Redo (Cmd+Shift+Z)"
-                className="size-8 rounded-full flex items-center justify-center text-fg-mute enabled:hover:text-fg enabled:hover:bg-white transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                <Redo2 size={14} strokeWidth={1.8} />
-              </button>
-            </div>
-            <button
-              onClick={() => setLibraryOpen(true)}
-              aria-label="My designs library"
-              title={`My designs (${savedDesigns.length})`}
-              className="hidden md:flex items-center gap-1.5 text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
-            >
-              <Heart size={13} strokeWidth={1.8} />
-              My designs
-              {savedDesigns.length > 0 && (
-                <span className="text-caption text-fg-faint tabular-nums">({savedDesigns.length})</span>
-              )}
-            </button>
-            <button
-              onClick={() => saveCurrentDesign()}
-              aria-label="Save design to your library"
-              title="Save design"
-              className="hidden md:flex items-center gap-1.5 text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
-            >
-              <Save size={13} strokeWidth={1.8} />
-              Save
-            </button>
-            <button
-              onClick={shareCurrentDesign}
-              aria-label="Share design link"
-              title="Share design"
-              className="hidden md:flex items-center gap-1.5 text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
-            >
-              <Share2 size={13} strokeWidth={1.8} />
-              Share
-            </button>
             <button
               onClick={handleSaveDraft}
               className="text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
             >
               Save Draft
             </button>
-            <div className="relative">
-              <button
-                onClick={handleAddToCart}
-                className="flex items-center gap-2 px-5 h-9 bg-fg text-white rounded-full text-meta font-semibold hover:bg-brand transition-colors btn-press"
-              >
-                <ShoppingBag size={14} strokeWidth={1.8} />
-                Add to bag · ${totalPrice.toLocaleString()}
-              </button>
-              {(layerSurchargesPerUnit > 0 || TRIM_SURCHARGE > 0) && (
-                <button
-                  onClick={() => setBreakdownOpen((v) => !v)}
-                  aria-label="Price breakdown"
-                  className="absolute -bottom-1 left-1/2 -translate-x-1/2 translate-y-full mt-1 text-caption text-fg-mute hover:text-fg underline underline-offset-4 whitespace-nowrap"
-                >
-                  {breakdownOpen ? "Hide breakdown" : "Price breakdown"}
-                </button>
-              )}
-              <AnimatePresence>
-                {breakdownOpen && (
-                  <motion.div
-                    initial={{ opacity: 0, y: -6 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -6 }}
-                    transition={{ duration: 0.18 }}
-                    className="absolute right-0 top-full mt-8 z-40 w-[280px] bg-white border border-black/5 rounded-2xl shadow-[0_12px_32px_-8px_rgba(0,0,0,0.16)] p-4"
-                  >
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-[9px] uppercase tracking-[0.22em] font-semibold text-fg-faint">
-                        Order total
-                      </span>
-                      <button
-                        onClick={() => setBreakdownOpen(false)}
-                        className="size-6 rounded-full hover:bg-black/5 flex items-center justify-center text-fg-mute hover:text-fg"
-                        aria-label="Close"
-                      >
-                        <X size={12} strokeWidth={1.8} />
-                      </button>
-                    </div>
-                    <div className="flex flex-col gap-1.5 text-meta">
-                      {priceLines.map((line, i) => (
-                        <div key={i} className="flex items-baseline justify-between gap-3">
-                          <div className="flex flex-col min-w-0">
-                            <span className="text-fg truncate">{line.label}</span>
-                            {line.note && (
-                              <span className="text-caption text-fg-faint">{line.note}</span>
-                            )}
-                          </div>
-                          <span className="text-fg tabular-nums">${line.amount.toLocaleString()}</span>
-                        </div>
-                      ))}
-                      <div className="border-t border-black/10 mt-2 pt-2 flex items-baseline justify-between font-semibold text-fg">
-                        <span>Total</span>
-                        <span className="tabular-nums">${totalPrice.toLocaleString()}</span>
-                      </div>
-                    </div>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
+            <button
+              onClick={handleAddToCart}
+              className="flex items-center gap-2 px-5 h-9 bg-fg text-white rounded-full text-meta font-semibold hover:bg-brand transition-colors btn-press"
+            >
+              <ShoppingBag size={14} strokeWidth={1.8} />
+              Add to bag · ${totalPrice.toLocaleString()}
+            </button>
           </div>
         </header>
 
         <div className="flex-1 overflow-hidden bg-[#f5f5f5] relative flex flex-col">
+          {/* Contextual print-method note. Surfaces only on placements where
+              the print technique differs from the front (DTG instead of the
+              standard embroidery). Black bar, white text — visible without
+              shouting, on-brand instead of alert-blue. */}
+          <AnimatePresence>
+            {(activePlacement === 'back' || activePlacement.startsWith('label')) && (
+              <motion.div
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+                className="bg-fg text-white overflow-hidden"
+              >
+                <div className="px-8 py-2.5 flex items-center gap-3">
+                  <div className="size-4 rounded-full border border-white/30 flex items-center justify-center shrink-0">
+                    <span className="text-[9px] leading-none italic font-serif">i</span>
+                  </div>
+                  <span className="text-meta leading-snug">
+                    Printed with <span className="font-semibold">DTG (Direct to Garment)</span>. Your main front design will be embroidered separately.
+                  </span>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           <div className="h-[56px] bg-white border-b border-black/[0.04] flex items-center px-8 relative z-20">
             <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-2 -mx-2 px-2 scroll-smooth">
@@ -1063,6 +567,25 @@ function CustomizePageInner({
                     }`}
                   >
                     <span className="relative z-10">{p.label}</span>
+                    
+                    {(p.badge || p.badges) && (
+                      <div className="flex items-center gap-1">
+                        {p.badge && (
+                          <span className={`px-1.5 py-0.5 rounded-md text-[8px] font-semibold uppercase tracking-wider ${
+                            p.badgeType === "primary" ? "bg-brand text-white" : "bg-black/10 text-black/60"
+                          }`}>
+                            {p.badge}
+                          </span>
+                        )}
+                        {p.badges?.map((b) => (
+                          <span key={b.text} className={`px-1.5 py-0.5 rounded-md text-[8px] font-semibold uppercase tracking-wider ${
+                            b.type === "primary" ? "bg-brand text-white" : "bg-black/10 text-black/60"
+                          }`}>
+                            {b.text}
+                          </span>
+                        ))}
+                      </div>
+                    )}
 
                     {isActive && (
                       <motion.div
@@ -1095,112 +618,15 @@ function CustomizePageInner({
                 <Product3DViewer
                   ref={viewer3DRef}
                   colorHex={activeColor.hex}
-                  trimColorHex={trimColor ? (product.colors.find((c) => c.name === trimColor)?.hex ?? null) : null}
                   modelPath={product.modelPath}
                   showControlsLayout={false}
                   zoom={zoom}
                   resetSignal={resetSignal}
                   activePlacement={activePlacement}
-                  layers={layers}
-                  onLayerDrag={(placementId, t) => {
-                    // Persist drag-position back into the layer. Drei's auto-
-                    // orient handles rotation against the surface normal so
-                    // dragging never touches the user's in-plane roll.
-                    setLayers((prev) =>
-                      prev.map((l) =>
-                        l.placementId === placementId
-                          ? { ...l, customPosition: t.position }
-                          : l,
-                      ),
-                    );
-                  }}
-                  onLayerScale={(_placementId, factor) => scaleActiveLayer(factor)}
-                  onLayerRotate={(_placementId, delta) => rotateActiveLayer(delta)}
+                  designImageUrl={designUrl}
                 />
               </Suspense>
             </ModelErrorBoundary>
-
-            {/* ── PROPERTIES PANEL ──
-                Floating right-side panel for fine-tuning the active layer.
-                Appears only when there's a layer at the active placement so
-                it never confuses first-time users with empty controls. */}
-            <AnimatePresence>
-              {activeLayer && (
-                <motion.div
-                  key="props"
-                  initial={{ opacity: 0, x: 16 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: 16 }}
-                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                  className="absolute top-4 right-4 z-30 w-[252px] bg-white/95 backdrop-blur-xl border border-black/5 rounded-2xl shadow-[0_8px_32px_-12px_rgba(0,0,0,0.12)] p-4 flex flex-col gap-4"
-                >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <span className="block text-[9px] uppercase tracking-[0.3em] font-medium text-fg-faint mb-0.5">
-                        Properties
-                      </span>
-                      <h4 className="text-[13px] font-semibold text-fg leading-tight">
-                        {placements.find((p) => p.id === activePlacement)?.label ?? "Layer"}
-                      </h4>
-                    </div>
-                    <button
-                      onClick={resetActiveLayerTransform}
-                      className="text-caption text-fg-mute hover:text-fg underline underline-offset-4"
-                      title="Reset position, rotation and scale to placement default"
-                    >
-                      Reset
-                    </button>
-                  </div>
-
-                  {/* Scale slider — wheel-over-body also drives this. */}
-                  <div className="flex flex-col gap-1.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-caption text-fg-mute">Size</span>
-                      <span className="text-caption text-fg tabular-nums">
-                        {Math.round(((activeLayer.scale ?? 0.2) / 0.2) * 100)}%
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={MIN_SCALE}
-                      max={MAX_SCALE}
-                      step={0.005}
-                      value={activeLayer.scale ?? 0.2}
-                      onChange={(e) => setActiveLayerScale(parseFloat(e.target.value))}
-                      className="w-full accent-black h-1 cursor-pointer"
-                      aria-label="Layer size"
-                    />
-                  </div>
-
-                  {/* Rotation slider — Shift-drag on the model also drives this. */}
-                  <div className="flex flex-col gap-1.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-caption text-fg-mute">Rotation</span>
-                      <span className="text-caption text-fg tabular-nums">
-                        {Math.round(((activeLayer.customRotation ?? 0) * 180) / Math.PI)}°
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={-Math.PI}
-                      max={Math.PI}
-                      step={Math.PI / 90}
-                      value={activeLayer.customRotation ?? 0}
-                      onChange={(e) => setActiveLayerRotation(parseFloat(e.target.value))}
-                      className="w-full accent-black h-1 cursor-pointer"
-                      aria-label="Layer rotation"
-                    />
-                  </div>
-
-                  <div className="border-t border-black/5 pt-3 -mx-1">
-                    <p className="text-[10px] leading-relaxed text-fg-faint px-1">
-                      <span className="font-semibold text-fg-mute">Tip:</span> drag on the model to move ·{" "}
-                      <kbd className="px-1 py-0.5 rounded bg-black/5 text-[9px]">Shift</kbd> + drag to rotate · scroll to resize
-                    </p>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
 
             {/* Drag-and-drop overlay — shows the moment the user drags an
                 image file over the workspace. Clearly affords "drop here". */}
@@ -1249,8 +675,6 @@ function CustomizePageInner({
                 product={product}
                 selectedColor={selectedColor}
                 onSelectColor={setSelectedColor}
-                trimColor={trimColor}
-                onSelectTrimColor={setTrimColor}
                 selectedSize={selectedSize}
                 onSelectSize={setSelectedSize}
                 quantity={quantity}
@@ -1264,8 +688,8 @@ function CustomizePageInner({
                 <PromptBar
                   onSubmit={handlePromptSubmit}
                   busy={designBusy}
-                  generatedUrl={primaryDesignUrl}
-                  onClear={clearActivePlacementLayer}
+                  generatedUrl={designUrl}
+                  onClear={clearDesign}
                   error={designError}
                 />
               )}
@@ -1355,120 +779,6 @@ function CustomizePageInner({
         productImage={tryOnImage}
         productCategory={product.category}
       />
-
-      {/* ── MY DESIGNS LIBRARY ──
-          Side drawer listing all designs the user has saved locally. Per-row
-          actions: Load (replaces current state), Remove. Header note clarifies
-          this is device-local storage so users don't expect cross-device sync. */}
-      <AnimatePresence>
-        {libraryOpen && (
-          <>
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              transition={{ duration: 0.18 }}
-              onClick={() => setLibraryOpen(false)}
-              className="fixed inset-0 bg-black/40 z-[80]"
-            />
-            <motion.aside
-              initial={{ x: "100%" }}
-              animate={{ x: 0 }}
-              exit={{ x: "100%" }}
-              transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-              role="dialog"
-              aria-label="My designs"
-              className="fixed top-0 right-0 h-full w-full sm:w-[440px] bg-white z-[81] shadow-2xl flex flex-col"
-            >
-              <header className="flex items-center justify-between px-6 py-5 border-b border-black/5 shrink-0">
-                <div>
-                  <span className="block text-[9px] uppercase tracking-[0.3em] font-medium text-fg-faint mb-0.5">
-                    Library
-                  </span>
-                  <h3 className="text-[18px] font-semibold tracking-tight text-fg">
-                    My designs
-                  </h3>
-                </div>
-                <button
-                  onClick={() => setLibraryOpen(false)}
-                  aria-label="Close library"
-                  className="size-9 rounded-full hover:bg-black/5 flex items-center justify-center text-fg-mute hover:text-fg transition-colors"
-                >
-                  <X size={16} strokeWidth={1.6} />
-                </button>
-              </header>
-              <div className="flex-1 overflow-y-auto p-6">
-                {savedDesigns.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center text-center gap-3 py-16">
-                    <Heart size={26} strokeWidth={1.4} className="text-fg-faint" />
-                    <p className="text-meta text-fg-mute leading-relaxed max-w-[260px]">
-                      No saved designs yet. Build something, then tap{" "}
-                      <span className="font-semibold text-fg">Save</span> to keep it here.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-3">
-                    <p className="text-caption text-fg-faint leading-relaxed mb-1">
-                      Designs are saved on this device. To share with someone else, use the
-                      Share button — they'll need to open the link on the same device for it
-                      to load (no backend yet).
-                    </p>
-                    {savedDesigns.map((record) => {
-                      const isCurrentProduct = record.productId === product.id;
-                      return (
-                        <div
-                          key={record.id}
-                          className={`flex gap-3 p-3 rounded-2xl border transition-colors ${
-                            isCurrentProduct
-                              ? "border-black/10 hover:border-black/40"
-                              : "border-black/5 opacity-60"
-                          }`}
-                        >
-                          <div className="size-16 rounded-xl overflow-hidden bg-[#f5f5f5] border border-black/5 shrink-0">
-                            {record.thumbnail ? (
-                              <img src={record.thumbnail} alt="" className="w-full h-full object-cover" />
-                            ) : (
-                              <div className="w-full h-full flex items-center justify-center text-fg-faint">
-                                <Layers size={18} strokeWidth={1.4} />
-                              </div>
-                            )}
-                          </div>
-                          <div className="flex-1 min-w-0 flex flex-col">
-                            <p className="text-meta font-semibold text-fg truncate">{record.name}</p>
-                            <p className="text-caption text-fg-faint">
-                              {record.color}{record.trimColor ? ` + ${record.trimColor} trim` : ""} ·{" "}
-                              {record.size} · ×{record.quantity} ·{" "}
-                              {record.layers.length} design{record.layers.length === 1 ? "" : "s"}
-                            </p>
-                            <p className="text-caption text-fg-faint mt-0.5">
-                              {new Date(record.savedAt).toLocaleString()}
-                            </p>
-                            <div className="flex items-center gap-2 mt-2">
-                              <button
-                                onClick={() => loadSavedDesign(record)}
-                                disabled={!isCurrentProduct}
-                                className="text-meta font-semibold text-fg hover:text-brand transition-colors underline underline-offset-4 disabled:opacity-30 disabled:cursor-not-allowed disabled:no-underline"
-                              >
-                                {isCurrentProduct ? "Load" : "Different product"}
-                              </button>
-                              <button
-                                onClick={() => removeSavedDesign(record.id)}
-                                className="text-meta text-fg-mute hover:text-red-500 transition-colors underline underline-offset-4 ml-auto"
-                              >
-                                Remove
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </motion.aside>
-          </>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
@@ -1483,9 +793,6 @@ interface ConfigDockProps {
   product: Product;
   selectedColor: string;
   onSelectColor: (name: string) => void;
-  /** When null the trim matches the body. */
-  trimColor: string | null;
-  onSelectTrimColor: (name: string | null) => void;
   selectedSize: string;
   onSelectSize: (size: SizeCode) => void;
   quantity: number;
@@ -1499,8 +806,6 @@ function ConfigDock({
   product,
   selectedColor,
   onSelectColor,
-  trimColor,
-  onSelectTrimColor,
   selectedSize,
   onSelectSize,
   quantity,
@@ -1509,7 +814,6 @@ function ConfigDock({
   onVR,
   onTryOn,
 }: ConfigDockProps) {
-  const [trimOpen, setTrimOpen] = useState(false);
   return (
     <motion.div
       initial={{ y: 12, opacity: 0 }}
@@ -1521,7 +825,7 @@ function ConfigDock({
           horizontally rather than overflow or shrink-clip controls. */}
       <div className="flex items-center gap-3 px-3 py-2 bg-white/95 backdrop-blur-xl border border-black/[0.06] rounded-full shadow-[0_12px_32px_-12px_rgba(0,0,0,0.12)] overflow-x-auto no-scrollbar max-w-full">
         {/* Color — bigger swatches on mobile for tap accuracy */}
-        <div className="flex items-center gap-1.5 shrink-0 relative">
+        <div className="flex items-center gap-1.5 shrink-0">
           {product.colors.map((c) => {
             const isActive = selectedColor === c.name;
             return (
@@ -1540,73 +844,6 @@ function ConfigDock({
               />
             );
           })}
-          {/* Trim color toggle — small "+" puck that opens a popover with the
-              same swatches mapped to the trim. Engages a two-tone garment
-              without cluttering the primary color row. */}
-          <button
-            onClick={() => setTrimOpen((v) => !v)}
-            aria-label="Trim color"
-            aria-pressed={trimOpen}
-            title={trimColor ? `Trim: ${trimColor}` : "Add trim color"}
-            className={`size-8 lg:size-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${
-              trimColor
-                ? "ring-2 ring-fg ring-offset-2 ring-offset-white"
-                : "bg-black/[0.04] hover:bg-black/[0.08]"
-            }`}
-            style={trimColor ? {
-              backgroundColor: product.colors.find((c) => c.name === trimColor)?.hex ?? "#000",
-              boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.08)",
-            } : undefined}
-          >
-            {!trimColor && <span className="text-fg-faint text-[12px] font-semibold leading-none">+</span>}
-          </button>
-          <AnimatePresence>
-            {trimOpen && (
-              <motion.div
-                initial={{ opacity: 0, y: 6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 6 }}
-                transition={{ duration: 0.18 }}
-                className="absolute bottom-full left-0 mb-2 z-40 bg-white border border-black/5 rounded-2xl shadow-[0_12px_32px_-8px_rgba(0,0,0,0.16)] p-3 flex flex-col gap-2 w-[220px]"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[9px] uppercase tracking-[0.22em] font-semibold text-fg-faint">
-                    Trim color
-                  </span>
-                  {trimColor && (
-                    <button
-                      onClick={() => { onSelectTrimColor(null); setTrimOpen(false); }}
-                      className="text-[10px] text-fg-mute hover:text-fg underline underline-offset-4"
-                    >
-                      Reset
-                    </button>
-                  )}
-                </div>
-                <div className="grid grid-cols-6 gap-1.5">
-                  {product.colors.map((c) => {
-                    const isActive = trimColor === c.name;
-                    return (
-                      <button
-                        key={c.name}
-                        onClick={() => { onSelectTrimColor(c.name); setTrimOpen(false); }}
-                        aria-label={c.name}
-                        title={c.name}
-                        className={`size-7 rounded-full transition-[box-shadow] duration-150 ${
-                          isActive
-                            ? "ring-2 ring-fg ring-offset-2 ring-offset-white"
-                            : "hover:ring-1 hover:ring-black/20 hover:ring-offset-1 hover:ring-offset-white"
-                        }`}
-                        style={{ backgroundColor: c.hex, boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.08)" }}
-                      />
-                    );
-                  })}
-                </div>
-                <p className="text-[10px] text-fg-faint leading-relaxed">
-                  Paints collar, cuffs, hem and seams independently of the body.
-                </p>
-              </motion.div>
-            )}
-          </AnimatePresence>
         </div>
 
         <DockDivider />
@@ -1715,13 +952,6 @@ interface ToolPanelProps {
   activeTool: ToolId;
   product: Product;
   designUrl: string | null;
-  layers: DesignLayer[];
-  placements: Array<{ id: string; label: string }>;
-  activePlacement: string;
-  onSelectLayer: (layerId: string) => void;
-  onToggleLayerHidden: (layerId: string) => void;
-  onRemoveLayer: (layerId: string) => void;
-  onClearAllLayers: () => void;
   onUpload: () => void;
   onApplyStock: (url: string) => void;
   onApplyText: (text: string, weight: 400 | 500 | 600, dark: boolean) => void;
@@ -1732,13 +962,6 @@ interface ToolPanelProps {
 function ToolPanel({
   activeTool,
   designUrl,
-  layers,
-  placements,
-  activePlacement,
-  onSelectLayer,
-  onToggleLayerHidden,
-  onRemoveLayer,
-  onClearAllLayers,
   onUpload,
   onApplyStock,
   onApplyText,
@@ -1774,17 +997,7 @@ function ToolPanel({
         {activeTool === "upload" && <UploadPanel onUpload={onUpload} designUrl={designUrl} onClear={onClearDesign} />}
         {activeTool === "stock" && <StockPanel onApply={onApplyStock} />}
         {activeTool === "text" && <TextPanel onApply={onApplyText} />}
-        {activeTool === "layers" && (
-          <LayersPanel
-            layers={layers}
-            placements={placements}
-            activePlacement={activePlacement}
-            onSelect={onSelectLayer}
-            onToggleHidden={onToggleLayerHidden}
-            onRemove={onRemoveLayer}
-            onClearAll={onClearAllLayers}
-          />
-        )}
+        {activeTool === "layers" && <LayersPanel designUrl={designUrl} onClear={onClearDesign} />}
       </div>
     </div>
   );
@@ -1963,106 +1176,40 @@ function TextPanel({
 }
 
 function LayersPanel({
-  layers,
-  placements,
-  activePlacement,
-  onSelect,
-  onToggleHidden,
-  onRemove,
-  onClearAll,
+  designUrl,
+  onClear,
 }: {
-  layers: DesignLayer[];
-  placements: Array<{ id: string; label: string }>;
-  activePlacement: string;
-  onSelect: (layerId: string) => void;
-  onToggleHidden: (layerId: string) => void;
-  onRemove: (layerId: string) => void;
-  onClearAll: () => void;
+  designUrl: string | null;
+  onClear: () => void;
 }) {
-  if (layers.length === 0) {
+  if (!designUrl) {
     return (
       <div className="flex flex-col items-center justify-center text-center gap-3 py-12">
         <Layers size={22} strokeWidth={1.4} className="text-fg-faint" />
-        <p className="text-meta text-fg-mute leading-relaxed max-w-[220px]">
-          No designs yet. Pick a placement, then add a design with AI, Upload, Stock or Text.
+        <p className="text-meta text-fg-mute leading-relaxed max-w-[200px]">
+          No design yet. Pick a tool to start.
         </p>
       </div>
     );
   }
-  const labelFor = (id: string) => placements.find((p) => p.id === id)?.label ?? id;
-  const sourceLabel: Record<DesignLayer["source"], string> = {
-    ai: "AI",
-    upload: "Upload",
-    stock: "Stock",
-    text: "Text",
-  };
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <span className="text-eyebrow uppercase tracking-[0.22em] text-fg-faint">
-          {layers.length} layer{layers.length === 1 ? "" : "s"}
-        </span>
-        {layers.length > 1 && (
-          <button
-            onClick={onClearAll}
-            className="text-caption text-fg-mute hover:text-fg underline underline-offset-4"
-          >
-            Clear all
-          </button>
-        )}
+    <div className="flex flex-col gap-4">
+      <span className="text-eyebrow uppercase tracking-[0.22em] text-fg-faint">Active layer</span>
+      <div className="flex items-center gap-3 p-3 rounded-xl border border-black/10">
+        <div className="size-12 rounded-lg overflow-hidden bg-[#f5f5f5] border border-black/5 shrink-0">
+          <img src={designUrl} alt="" className="w-full h-full object-contain" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-meta font-medium text-fg leading-tight">Design</p>
+          <p className="text-caption text-fg-faint">Applied to selected placement</p>
+        </div>
       </div>
-      <div className="flex flex-col gap-2">
-        {layers.map((layer) => {
-          const isActive = layer.placementId === activePlacement;
-          return (
-            <div
-              key={layer.id}
-              className={`group flex items-center gap-3 p-2.5 rounded-xl border transition-colors ${
-                isActive ? "border-fg bg-black/[0.02]" : "border-black/10 hover:border-black/30"
-              } ${layer.hidden ? "opacity-50" : ""}`}
-            >
-              <button
-                onClick={() => onSelect(layer.id)}
-                className="flex items-center gap-3 flex-1 min-w-0 text-left"
-                title={`Edit ${labelFor(layer.placementId)}`}
-              >
-                <div className="size-11 rounded-lg overflow-hidden bg-[#f5f5f5] border border-black/5 shrink-0">
-                  <img src={layer.imageUrl} alt="" className="w-full h-full object-contain" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-meta font-medium text-fg leading-tight truncate">
-                    {labelFor(layer.placementId)}
-                  </p>
-                  <p className="text-caption text-fg-faint">
-                    {sourceLabel[layer.source]}{isActive ? " · editing" : ""}
-                  </p>
-                </div>
-              </button>
-              <button
-                onClick={() => onToggleHidden(layer.id)}
-                aria-label={layer.hidden ? "Show layer" : "Hide layer"}
-                title={layer.hidden ? "Show" : "Hide"}
-                className="size-7 rounded-full hover:bg-black/[0.05] flex items-center justify-center text-fg-mute hover:text-fg transition-colors shrink-0"
-              >
-                <span aria-hidden className="text-[14px] leading-none">
-                  {layer.hidden ? "○" : "●"}
-                </span>
-              </button>
-              <button
-                onClick={() => onRemove(layer.id)}
-                aria-label="Remove layer"
-                title="Remove"
-                className="size-7 rounded-full hover:bg-red-500/10 flex items-center justify-center text-fg-mute hover:text-red-500 transition-colors shrink-0"
-              >
-                <X size={13} strokeWidth={1.8} />
-              </button>
-            </div>
-          );
-        })}
-      </div>
-      <p className="text-caption text-fg-faint mt-1 leading-relaxed">
-        Tap a layer to switch to that placement. Hide / remove individually, or Clear all to start over.
-      </p>
+      <button
+        onClick={onClear}
+        className="h-10 rounded-full border border-black/10 text-meta text-fg-mute hover:border-fg hover:text-fg transition-colors"
+      >
+        Remove design
+      </button>
     </div>
   );
 }

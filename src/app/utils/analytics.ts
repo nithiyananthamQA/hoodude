@@ -27,8 +27,7 @@ export type AnalyticsEvent =
   | "design_prompt_submit"
   | "design_generated"
   | "customize_add_to_cart"
-  | "customize_save_draft"
-  | "customize_save_design";
+  | "customize_save_draft";
 
 type EventProps = Record<string, string | number | boolean | null | undefined>;
 

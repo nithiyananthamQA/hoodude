@@ -1,275 +1,73 @@
 import { Suspense, useEffect, useRef, useMemo, useState, useCallback, forwardRef, useImperativeHandle } from "react";
 import { Canvas, useFrame, type ThreeEvent } from "@react-three/fiber";
-import { OrbitControls, useGLTF, Center, Html, useProgress, Environment, ContactShadows } from "@react-three/drei";
+import { OrbitControls, useGLTF, Center, Html, useProgress, Decal, Environment, ContactShadows } from "@react-three/drei";
 import * as THREE from "three";
 import { Minus, Plus, Maximize2, Sparkles, Move } from "lucide-react";
 
 /** Single source of truth for the default model path. */
 export const DEFAULT_MODEL_PATH = "/3d/white-tshirt.glb";
 
-/** Resolved transform for a placement, used to position a flat plane mesh
- *  on the garment surface. Switched from <Decal> cube projection (which was
- *  silently failing on 3 of 4 placements) to a plane mesh — guaranteed to
- *  render, and move/resize/rotate become direct transforms on the plane. */
-interface PlacementTransform {
-  /** Plane center position in mesh-local space (same space as GLB vertices). */
+interface DecalTransform {
   position: [number, number, number];
-  /** Euler [x, y, z] orienting the plane so its face points outward from
-   *  the garment surface at this placement. */
   rotation: [number, number, number];
-  /** Plane width in world units. Height is set equal to width by default
-   *  (square aspect), unless the user resizes asymmetrically. */
-  width: number;
+  scale: number;
 }
 
-/**
- * Public layer shape used by the customize page. Each placement can hold one
- * layer; the viewer renders all visible layers as separate <Decal> children
- * so users can have e.g. a small logo on the chest AND a big graphic on the
- * back at the same time.
- */
-export interface DesignLayer {
-  id: string;
-  placementId: string;
-  imageUrl: string;
-  source: "ai" | "upload" | "stock" | "text";
-  /** Optional scale override; falls back to placement preset. */
-  scale?: number;
-  /** Drag-positioned point on the body mesh (overrides the placement preset). */
-  customPosition?: [number, number, number];
-  /** In-plane rotation around the surface normal, in radians.
-   *  Single scalar — drei auto-orients to the surface, this just twists it. */
-  customRotation?: number;
-  hidden?: boolean;
-}
-
-/**
- * Placement preset in normalised body-space:
- * - xN: -1 = left edge, 0 = center, +1 = right edge of the body bbox X-range
- * - yN: 0 = hem (bottom), 1 = collar (top) of the body bbox Y-range
- * - zN: -1 = back, +1 = front of the body bbox Z-range
- * - scaleN: fraction of the body bbox X-width to occupy
- *
- * The viewer resolves these to absolute mesh-local coordinates at render
- * time using the actual body bbox so the same presets work across all our
- * authored GLBs (white-tshirt, hood, zipper-hood, knitted-jacket), each of
- * which has slightly different absolute coordinates.
- */
-interface PlacementPreset {
-  xN: number;      // [-1, 1]
-  yN: number;      // [0, 1]
-  zN: -1 | 1;      // back or front
-  scaleN: number;  // fraction of body width
-  /** Optional in-plane rotation around the surface normal (radians). */
-  rollZ?: number;
-}
-
-const PLACEMENT_PRESETS: Record<string, PlacementPreset> = {
-  // Four zones, simple and obvious. Two-color trim (collar/cuffs/hem) is a
-  // separate body+trim color system — not a design placement.
-  //
-  // yN values are tuned for our authored garments:
-  //   1.0 = top of bbox (collar / hood top)
-  //   0.85+ = neck opening (no fabric — avoid)
-  //   0.66 = chest line (sweet spot for front + back design)
-  //   0.30 = waist
-  //   0.0 = hem
-  //
-  // For sleeves, xN of ±0.65 lands roughly at the upper-arm sleeve area
-  // (between the shoulder and the cuff). The decal's auto-orient picks the
-  // outward-facing normal of the nearest sleeve vertex, so the decal lays
-  // flat on the sleeve surface even without precise positioning.
-  front_chest:  { xN:  0,    yN: 0.66, zN:  1, scaleN: 0.42 },
-  back:         { xN:  0,    yN: 0.66, zN: -1, scaleN: 0.55 },
-  left_sleeve:  { xN:  0.65, yN: 0.78, zN:  1, scaleN: 0.18 },
-  right_sleeve: { xN: -0.65, yN: 0.78, zN:  1, scaleN: 0.18 },
-};
-
-export function getPlacementPreset(id?: string): PlacementPreset | null {
-  if (!id) return null;
-  return PLACEMENT_PRESETS[id] ?? null;
-}
-
-interface BodyBounds {
-  min: THREE.Vector3;
-  max: THREE.Vector3;
-}
-
-/** Resolve a placement preset to a flat plane transform on the body mesh.
- *  The plane is positioned slightly OFF the surface in the outward direction
- *  (small offset to avoid z-fighting with the fabric), oriented to face the
- *  camera direction for that placement.
- *
- *  We use bbox-derived positions because raycasting against the body mesh
- *  was unreliable on these specific authored GLBs. The bbox-only approach
- *  always produces a valid position regardless of the model's internal
- *  geometry quirks. */
-function resolvePlacement(
-  id: string | undefined,
-  bounds: BodyBounds | null,
-): PlacementTransform | null {
-  if (!id || !bounds) return null;
-  const preset = getPlacementPreset(id);
-  if (!preset) return null;
-
-  const sizeX = bounds.max.x - bounds.min.x;
-  const sizeY = bounds.max.y - bounds.min.y;
-  const sizeZ = bounds.max.z - bounds.min.z;
-  const cx = (bounds.min.x + bounds.max.x) / 2;
-  const yPos = bounds.min.y + preset.yN * sizeY;
-
-  // Tiny outward offset so the plane sits *just* above the fabric surface
-  // without z-fighting. The fabric mesh is thin so even a small gap reads
-  // as "stuck to the shirt" from typical viewing distances.
-  const surfaceOffset = Math.max(sizeX, sizeY, sizeZ) * 0.003;
-
-  const isSleeve = id === "left_sleeve" || id === "right_sleeve";
-
-  let xPos: number;
-  let zPos: number;
-  let rotation: [number, number, number];
-
-  if (isSleeve) {
-    // Sleeve plane: positioned at the outer edge of the body bbox + a small
-    // outward offset, rotated 90° around Y so its face points sideways.
-    xPos = cx + preset.xN * (sizeX / 2 + surfaceOffset);
-    zPos = 0;
-    rotation = preset.xN > 0
-      ? [0,  Math.PI / 2, preset.rollZ ?? 0]   // left sleeve (faces +X)
-      : [0, -Math.PI / 2, preset.rollZ ?? 0];  // right sleeve (faces -X)
-  } else if (preset.zN === 1) {
-    // Front chest: plane in front of the front surface, default Euler
-    // makes a <planeGeometry>'s face point toward +Z, which matches the
-    // outward-facing direction at the chest. No rotation needed.
-    xPos = cx + preset.xN * (sizeX / 2);
-    zPos = bounds.max.z + surfaceOffset;
-    rotation = [0, 0, preset.rollZ ?? 0];
-  } else {
-    // Back: plane behind the back surface, rotated 180° around Y so the
-    // plane's face points outward (toward -Z) instead of into the body.
-    xPos = cx + preset.xN * (sizeX / 2);
-    zPos = bounds.min.z - surfaceOffset;
-    rotation = [0, Math.PI, preset.rollZ ?? 0];
+function getPlacementProps(id?: string): DecalTransform | null {
+  switch (id) {
+    case "chest_left":       return { position: [0.11, 0.07, 0.15], rotation: [0, 0, 0], scale: 0.14 };
+    case "chest_center":     return { position: [0, 0.09, 0.15], rotation: [0, 0, 0], scale: 0.18 };
+    case "large_center":     return { position: [0, -0.05, 0.15], rotation: [0, 0, 0], scale: 0.35 };
+    case "back":             return { position: [0, 0, -0.165], rotation: [0, Math.PI, 0], scale: 0.38 };
+    case "sleeve_left_top":  return { position: [0.24, 0.08, 0.05], rotation: [0, Math.PI / 2.5, 0], scale: 0.12 };
+    case "sleeve_right_top": return { position: [-0.24, 0.08, 0.05], rotation: [0, -Math.PI / 2.5, 0], scale: 0.12 };
+    default: return null;
   }
-
-  return {
-    position: [xPos, yPos, zPos],
-    rotation,
-    width: sizeX * preset.scaleN,
-  };
-}
-
-interface RenderedLayer {
-  id: string;
-  placementId: string;
-  texture: THREE.Texture;
-  /** Optional user-applied overrides; Model resolves the rest from the
-   *  body-mesh bbox at render time so coordinates work universally. */
-  customPosition?: [number, number, number];
-  /** In-plane roll (single radian scalar). */
-  customRotation?: number;
-  customScale?: number;
 }
 
 interface ModelProps {
   colorHex: string;
-  /** Optional second color for trim meshes (collar/cuffs/hem/seams). When
-   *  omitted the trim is painted with `colorHex` so there's no visual change
-   *  for callers that don't opt in. */
-  trimColorHex?: string | null;
   modelPath: string;
   activePlacement?: string;
-  /** Placeholder texture shown when no layer exists for the active placement. */
   uploadTexture: THREE.Texture;
-  /** All layers to render. Each will be drawn as its own <Decal>. */
-  layers: RenderedLayer[];
-  /** When set, overrides the active layer's preset position/rotation. */
-  customDecal: { position: [number, number, number] } | null;
-  /** Fired when user drags the design across the body mesh. Only the
-   *  position is transmitted; rotation comes from drei's auto-orient. */
-  onCustomDecalChange: (t: { position: [number, number, number] }) => void;
+  /** When set, overrides the placement preset (only position+rotation; scale
+   *  comes from the active placement so the design doesn't resize on drag). */
+  customDecal: { position: [number, number, number]; rotation: [number, number, number] } | null;
+  /** Fired when user drags the design across the body mesh. */
+  onCustomDecalChange: (t: { position: [number, number, number]; rotation: [number, number, number] }) => void;
   /** Toggles whether drag-to-position is allowed (only when there's a real
    *  design — otherwise the placeholder is fixed to the active placement). */
   enableDrag: boolean;
   /** Notifies parent so OrbitControls can be paused while dragging. */
   onDragChange: (dragging: boolean) => void;
-  /** Wheel-over-body resizes the active layer. Delta is multiplicative. */
-  onActiveLayerScale: (factor: number) => void;
-  /** Shift-drag rotates the active layer in-plane. Delta is radians. */
-  onActiveLayerRotate: (deltaRadians: number) => void;
 }
 
 function Model({
   colorHex,
-  trimColorHex,
   modelPath,
   activePlacement,
   uploadTexture,
-  layers,
   customDecal,
   onCustomDecalChange,
   enableDrag,
   onDragChange,
-  onActiveLayerScale,
-  onActiveLayerRotate,
 }: ModelProps) {
   const { nodes, scene } = useGLTF(modelPath) as any;
   const groupRef = useRef<THREE.Group>(null!);
   const draggingRef = useRef(false);
 
-  // Identify the body mesh + capture its bounding box. Pure bbox math is
-  // used to derive placement positions — no raycasting, because raycasts
-  // were missing for 3 of 4 placements on our authored GLBs (the rays
-  // went through the neck opening or glanced off the curved sleeve).
-  const { bodyMeshName, bodyBounds } = useMemo(() => {
-    const entries = Object.entries(nodes) as Array<[string, any]>;
-    const meshes = entries.filter(([, n]) => n?.isMesh && n.geometry);
-    if (meshes.length === 0) return { bodyMeshName: null, bodyBounds: null };
-    const score = (name: string, node: any) => {
-      const lc = name.toLowerCase();
-      let s = node.geometry?.attributes?.position?.count ?? 0;
-      if (lc.includes("cloth")) s *= 4;
-      if (lc.includes("shirt") || lc.includes("body") || lc.includes("garment") || lc.includes("fabric")) s *= 4;
-      if (lc.includes("trim") || lc.includes("seam") || lc.includes("zipper") || lc.includes("button") || lc.includes("label")) s *= 0.05;
-      return s;
-    };
-    let best = meshes[0];
-    let bestScore = score(meshes[0][0], meshes[0][1]);
-    for (let i = 1; i < meshes.length; i++) {
-      const s = score(meshes[i][0], meshes[i][1]);
-      if (s > bestScore) { best = meshes[i]; bestScore = s; }
-    }
-    const bestNode = best[1];
-    bestNode.geometry.computeBoundingBox?.();
-    // Authored GLBs frequently have inconsistent / broken normals on the
-    // sleeve and chest regions (UV seam averaging quirks during export).
-    // DecalGeometry's clipping uses normals to reject triangles, so bad
-    // normals cause silent decal failures. Recompute fresh normals once
-    // here so every triangle has a reliable outward-facing normal.
-    bestNode.geometry.computeVertexNormals?.();
-    bestNode.geometry.normalizeNormals?.();
-    const box = bestNode.geometry.boundingBox as THREE.Box3 | null;
-    if (!box) return { bodyMeshName: best[0], bodyBounds: null };
-    const bounds: BodyBounds = { min: box.min.clone(), max: box.max.clone() };
-    return { bodyMeshName: best[0], bodyBounds: bounds };
-  }, [nodes]);
-
-  // Update color. Body and trim are repainted independently so users can have
-  // (e.g.) a black shirt with a red collar / cuffs. Falls back to colorHex on
-  // every mesh when trimColorHex isn't provided.
+  // Update color
   useEffect(() => {
-    const body = new THREE.Color(colorHex);
-    const trim = new THREE.Color(trimColorHex ?? colorHex);
+    const color = new THREE.Color(colorHex);
     scene.traverse((c: any) => {
-      if (!c.isMesh || !c.material) return;
-      const isBody = c.name === bodyMeshName;
-      const target = isBody ? body : trim;
-      c.material.color.set(target);
-      if (c.material.metalness !== undefined) c.material.metalness = 0;
-      if (c.material.roughness !== undefined) c.material.roughness = 0.5;
-      c.material.needsUpdate = true;
+      if (c.isMesh && c.material) {
+        c.material.color.set(color);
+        if (c.material.metalness !== undefined) c.material.metalness = 0;
+        if (c.material.roughness !== undefined) c.material.roughness = 0.5;
+        c.material.needsUpdate = true;
+      }
     });
-  }, [colorHex, trimColorHex, scene, bodyMeshName]);
+  }, [colorHex, scene]);
 
   // Reset cursor when dragging is disabled (e.g. design cleared mid-drag).
   useEffect(() => {
@@ -279,41 +77,41 @@ function Model({
     };
   }, [enableDrag]);
 
-  // Convert a raycast hit to a local-space position. We deliberately don't
-  // return rotation from the drag — drei's Decal auto-orients to the
-  // closest vertex normal so the projection always lays flat on the curved
-  // surface, regardless of where we drop the position. Letting drag also
-  // set rotation caused the design to tilt unexpectedly as users moved it.
+  // Decal sourcing — custom drag position wins over placement preset, but the
+  // scale stays whatever the active placement defines so the design doesn't
+  // unexpectedly resize when dragged.
+  const placementProps = getPlacementProps(activePlacement);
+  const decalProps: DecalTransform | null = customDecal
+    ? {
+        position: customDecal.position,
+        rotation: customDecal.rotation,
+        scale: placementProps?.scale ?? 0.22,
+      }
+    : placementProps;
+
+  // Convert a raycast hit to a (localPosition, localRotation) tuple. The
+  // rotation aligns the decal's local Z with the surface normal at the hit
+  // point so the projection lays flat against the curve of the shirt.
   const transformFromHit = (e: ThreeEvent<PointerEvent>) => {
     if (!e.face) return null;
     const localPoint = e.object.worldToLocal(e.point.clone());
+    // e.face.normal is in geometry local space — same space the Decal lives in.
+    const normal = e.face.normal.clone();
+    const q = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 0, 1),
+      normal,
+    );
+    const euler = new THREE.Euler().setFromQuaternion(q);
     return {
       position: [localPoint.x, localPoint.y, localPoint.z] as [number, number, number],
+      rotation: [euler.x, euler.y, euler.z] as [number, number, number],
     };
   };
-
-  // Pointer-drag bookkeeping. We use refs (not state) for "is the user
-  // currently rotating with shift held?" because we don't need re-renders
-  // mid-drag — only the final-state notifications matter.
-  const rotatingRef = useRef(false);
-  const lastPointerXRef = useRef(0);
 
   const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
     if (!enableDrag) return;
     e.stopPropagation();
     (e.target as HTMLElement)?.setPointerCapture?.(e.pointerId);
-
-    // Shift-click → rotate mode. Plain click → move mode. The rotate mode
-    // converts horizontal pointer travel to radians of in-plane rotation.
-    const isShift = (e.nativeEvent as PointerEvent).shiftKey;
-    if (isShift) {
-      rotatingRef.current = true;
-      lastPointerXRef.current = e.clientX;
-      onDragChange(true);
-      document.body.style.cursor = "ew-resize";
-      return;
-    }
-
     draggingRef.current = true;
     onDragChange(true);
     document.body.style.cursor = "grabbing";
@@ -322,16 +120,6 @@ function Model({
   };
 
   const handlePointerMove = (e: ThreeEvent<PointerEvent>) => {
-    if (rotatingRef.current) {
-      e.stopPropagation();
-      const dx = e.clientX - lastPointerXRef.current;
-      lastPointerXRef.current = e.clientX;
-      // 200px of horizontal travel = one full rotation (2π). Feels natural
-      // on both desktop trackpads and mobile finger sweeps.
-      const delta = (dx / 200) * Math.PI * 2;
-      if (delta !== 0) onActiveLayerRotate(delta);
-      return;
-    }
     if (!draggingRef.current) return;
     e.stopPropagation();
     const t = transformFromHit(e);
@@ -339,13 +127,6 @@ function Model({
   };
 
   const endDrag = (e: ThreeEvent<PointerEvent>) => {
-    if (rotatingRef.current) {
-      rotatingRef.current = false;
-      onDragChange(false);
-      (e.target as HTMLElement)?.releasePointerCapture?.(e.pointerId);
-      document.body.style.cursor = enableDrag ? "grab" : "auto";
-      return;
-    }
     if (!draggingRef.current) return;
     draggingRef.current = false;
     onDragChange(false);
@@ -354,34 +135,31 @@ function Model({
   };
 
   const handlePointerOver = () => {
-    if (enableDrag && !draggingRef.current && !rotatingRef.current) document.body.style.cursor = "grab";
+    if (enableDrag && !draggingRef.current) document.body.style.cursor = "grab";
   };
   const handlePointerOut = () => {
-    if (!draggingRef.current && !rotatingRef.current) document.body.style.cursor = "auto";
-  };
-
-  // Wheel-over-body resizes the active layer. Stops the event from also
-  // dolly-ing the camera (OrbitControls would otherwise eat it).
-  const handleWheel = (e: ThreeEvent<WheelEvent>) => {
-    if (!enableDrag) return;
-    e.stopPropagation();
-    // Scroll up = bigger, scroll down = smaller. 1.05/0.95 = ~5% per tick.
-    const factor = e.deltaY < 0 ? 1.05 : 0.95;
-    onActiveLayerScale(factor);
+    if (!draggingRef.current) document.body.style.cursor = "auto";
   };
 
   return (
     <group ref={groupRef}>
-      {/* Body meshes — every GLB mesh rendered as-is. The body mesh itself
-          handles pointer events for the drag-to-move-design behaviour. */}
       {Object.entries(nodes).map(([name, node]: [string, any]) => {
         if (!node.isMesh) return null;
-        const isBody = name === bodyMeshName;
+
+        // Very permissive body detection
+        const isBody = name.toLowerCase().includes('shirt') ||
+                       name.toLowerCase().includes('body') ||
+                       name.toLowerCase().includes('fabric') ||
+                       name.includes('Object_4') ||
+                       name.includes('Mesh') ||
+                       name.toLowerCase().includes('garment');
+
         return (
           <mesh
             key={name}
             geometry={node.geometry}
             material={node.material}
+            renderOrder={1}
             castShadow
             receiveShadow
             onPointerDown={isBody ? handlePointerDown : undefined}
@@ -391,78 +169,26 @@ function Model({
             onPointerLeave={isBody ? endDrag : undefined}
             onPointerOver={isBody ? handlePointerOver : undefined}
             onPointerOut={isBody ? handlePointerOut : undefined}
-            onWheel={isBody ? handleWheel : undefined}
-          />
-        );
-      })}
-
-      {/* Design layers — each rendered as a flat plane mesh positioned on
-          the garment surface. This is the post-Decal architecture: <Decal>
-          was silently failing for 3 of 4 placements on these GLBs, so we
-          replaced it with a simpler "sticker on surface" approach that's
-          guaranteed to render. Move/resize/rotate are direct transforms on
-          the plane mesh, no projection math involved. */}
-      {bodyBounds && layers.map((layer) => {
-        const preset = resolvePlacement(layer.placementId, bodyBounds);
-        if (!preset) return null;
-        const isActive = layer.placementId === activePlacement;
-        // Drag-on-active-layer overrides preset position; otherwise the
-        // layer's stored custom position (set from a previous drag) wins.
-        const position: [number, number, number] =
-          (isActive ? customDecal?.position : undefined) ?? layer.customPosition ?? preset.position;
-        // Roll is layered on top of the placement's base outward-facing rotation.
-        const userRoll = layer.customRotation ?? 0;
-        const rotation: [number, number, number] = [
-          preset.rotation[0],
-          preset.rotation[1],
-          preset.rotation[2] + userRoll,
-        ];
-        const width = layer.customScale ?? preset.width;
-        return (
-          <mesh
-            key={layer.id}
-            position={position}
-            rotation={rotation}
-            renderOrder={2}
           >
-            <planeGeometry args={[width, width]} />
-            <meshBasicMaterial
-              map={layer.texture}
-              transparent
-              alphaTest={0.01}
-              side={THREE.DoubleSide}
-              depthWrite={false}
-              toneMapped={false}
-            />
+            {isBody && decalProps && (
+              <Decal
+                position={decalProps.position as any}
+                rotation={decalProps.rotation as any}
+                scale={decalProps.scale as any}
+                map={uploadTexture}
+              >
+                <meshStandardMaterial
+                  map={uploadTexture}
+                  transparent
+                  polygonOffset
+                  polygonOffsetFactor={-10}
+                  depthTest={true}
+                />
+              </Decal>
+            )}
           </mesh>
         );
       })}
-
-      {/* Placeholder — faded "Upload design" dashed-circle for the active
-          placement when nothing is applied there yet, so the user knows
-          where their next design will land. */}
-      {bodyBounds && activePlacement && !layers.some(l => l.placementId === activePlacement) && (() => {
-        const preset = resolvePlacement(activePlacement, bodyBounds);
-        if (!preset) return null;
-        return (
-          <mesh
-            position={preset.position}
-            rotation={preset.rotation}
-            renderOrder={2}
-          >
-            <planeGeometry args={[preset.width, preset.width]} />
-            <meshBasicMaterial
-              map={uploadTexture}
-              transparent
-              opacity={0.55}
-              alphaTest={0.01}
-              side={THREE.DoubleSide}
-              depthWrite={false}
-              toneMapped={false}
-            />
-          </mesh>
-        );
-      })()}
     </group>
   );
 }
@@ -477,8 +203,8 @@ function placementCameraPosition(
   cinematic: boolean,
 ): THREE.Vector3 {
   if (placement === "back") return new THREE.Vector3(0, 0, cinematic ? -2.6 : -2.4);
-  if (placement === "left_sleeve") return new THREE.Vector3(1.8, 0.3, 1.2);
-  if (placement === "right_sleeve") return new THREE.Vector3(-1.8, 0.3, 1.2);
+  if (placement?.includes("sleeve_left")) return new THREE.Vector3(1.8, 0.3, 1.2);
+  if (placement?.includes("sleeve_right")) return new THREE.Vector3(-1.8, 0.3, 1.2);
   return new THREE.Vector3(0, cinematic ? 0.1 : 0, cinematic ? 2.6 : 2.4);
 }
 
@@ -519,8 +245,6 @@ function CameraRig({
 
 interface Product3DViewerProps {
   colorHex: string;
-  /** Optional second color for trim meshes. See Model's trimColorHex prop. */
-  trimColorHex?: string | null;
   modelPath?: string;
   showControlsLayout?: boolean;
   zoom?: number;
@@ -535,25 +259,9 @@ interface Product3DViewerProps {
   /**
    * Optional image URL (data URL or http) to use as the decal texture in
    * place of the default "Upload design" placeholder. Used by the AI prompt
-   * bar to apply a generated design onto the active placement. Legacy
-   * single-layer API — prefer `layers` for multi-placement customization.
+   * bar to apply a generated design onto the active placement.
    */
   designImageUrl?: string | null;
-  /**
-   * Full multi-placement layer stack. Each entry renders as a separate
-   * <Decal> on the body mesh. Overrides `designImageUrl` when provided.
-   */
-  layers?: DesignLayer[];
-  /**
-   * Fired when the user drags the active layer across the body mesh. Lets
-   * the parent persist the new position/rotation back into the layer model.
-   */
-  onLayerDrag?: (placementId: string, t: { position: [number, number, number] }) => void;
-  /** Fired on wheel-over-body for the active layer. `factor` is multiplicative
-   *  (e.g. 1.05 = grow 5%, 0.95 = shrink 5%). Parent clamps to sensible bounds. */
-  onLayerScale?: (placementId: string, factor: number) => void;
-  /** Fired on shift-drag rotation. `deltaRadians` is incremental. */
-  onLayerRotate?: (placementId: string, deltaRadians: number) => void;
 }
 
 /** Imperative API exposed via ref. Lets the parent grab a PNG snapshot of the
@@ -577,7 +285,6 @@ function CanvasLoader() {
 
 const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(function Product3DViewer({
   colorHex,
-  trimColorHex,
   modelPath = DEFAULT_MODEL_PATH,
   showControlsLayout = true,
   activePlacement,
@@ -585,10 +292,6 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
   zoom,
   resetSignal,
   designImageUrl,
-  layers,
-  onLayerDrag,
-  onLayerScale,
-  onLayerRotate,
 }, ref) {
   // Wrapper ref — used to find the underlying canvas DOM for snapshots.
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -624,100 +327,50 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
     return tex;
   }, []);
 
-  // Effective layer list — if the parent uses the new `layers` API we honour
-  // that directly; otherwise we synthesise a single layer from the legacy
-  // `designImageUrl` prop so existing callers (PDP gallery) keep working.
-  const effectiveLayers = useMemo<DesignLayer[]>(() => {
-    if (layers && layers.length > 0) return layers.filter((l) => !l.hidden);
-    if (designImageUrl) {
-      return [{
-        id: "legacy-single",
-        placementId: activePlacement ?? "chest_center",
-        imageUrl: designImageUrl,
-        source: "ai",
-      }];
-    }
-    return [];
-  }, [layers, designImageUrl, activePlacement]);
-
-  // Cache of THREE.Texture instances keyed by source URL so we don't
-  // re-decode the same image when the user switches placements. Old textures
-  // are disposed when their URL leaves the cache (URL change or unmount).
-  const textureCacheRef = useRef<Map<string, THREE.Texture>>(new Map());
-  const [textureVersion, setTextureVersion] = useState(0);
-
+  // When the parent supplies a design image (e.g. from the AI prompt bar),
+  // load it as a Three texture and feed it to the Decal in place of the
+  // default placeholder. Texture lifecycle is tied to the URL — we dispose
+  // the old one whenever a new design lands.
+  const [designTexture, setDesignTexture] = useState<THREE.Texture | null>(null);
   useEffect(() => {
-    const cache = textureCacheRef.current;
-    const wanted = new Set(effectiveLayers.map((l) => l.imageUrl));
-    // Dispose textures no longer referenced by any layer.
-    for (const [url, tex] of cache) {
-      if (!wanted.has(url)) {
-        tex.dispose();
-        cache.delete(url);
-      }
+    if (!designImageUrl) {
+      setDesignTexture((prev) => {
+        prev?.dispose();
+        return null;
+      });
+      return;
     }
-    // Load any wanted URLs we haven't cached yet.
-    let cancelled = false;
     const loader = new THREE.TextureLoader();
     loader.crossOrigin = "anonymous";
-    let pending = 0;
-    for (const url of wanted) {
-      if (cache.has(url)) continue;
-      pending++;
-      loader.load(
-        url,
-        (tex) => {
-          if (cancelled) { tex.dispose(); return; }
-          tex.anisotropy = 16;
-          tex.colorSpace = THREE.SRGBColorSpace;
-          cache.set(url, tex);
-          setTextureVersion((v) => v + 1);
-        },
-        undefined,
-        (err) => {
-          if (import.meta.env.DEV) console.error("[Product3DViewer] texture load failed", url, err);
-        },
-      );
-    }
-    if (pending === 0) setTextureVersion((v) => v + 1); // trigger re-render when cache shrinks
-    return () => { cancelled = true; };
-  }, [effectiveLayers]);
+    loader.load(
+      designImageUrl,
+      (tex) => {
+        tex.anisotropy = 16;
+        // Premultiplied alpha so transparent edges blend cleanly on the garment
+        tex.colorSpace = THREE.SRGBColorSpace;
+        setDesignTexture((prev) => {
+          prev?.dispose();
+          return tex;
+        });
+      },
+      undefined,
+      (err) => {
+        if (import.meta.env.DEV) {
+          console.error("[Product3DViewer] design texture load failed", err);
+        }
+      },
+    );
+  }, [designImageUrl]);
 
-  // Dispose remaining textures on unmount.
-  useEffect(() => () => {
-    const cache = textureCacheRef.current;
-    for (const tex of cache.values()) tex.dispose();
-    cache.clear();
-  }, []);
+  const activeDecalTexture = designTexture ?? uploadTexture;
 
-  // Resolve effective layers into renderable form (with texture + per-layer
-  // overrides). The Model component does the final coord resolution against
-  // its body-mesh bbox so coordinates work across all 4 authored GLBs.
-  const renderedLayers = useMemo<RenderedLayer[]>(() => {
-    void textureVersion; // dep so we re-resolve when textures finish loading
-    const cache = textureCacheRef.current;
-    return effectiveLayers
-      .map((l) => {
-        const tex = cache.get(l.imageUrl);
-        if (!tex) return null;
-        return {
-          id: l.id,
-          placementId: l.placementId,
-          texture: tex,
-          customPosition: l.customPosition,
-          customRotation: l.customRotation,
-          customScale: l.scale,
-        } as RenderedLayer;
-      })
-      .filter((x): x is RenderedLayer => x !== null);
-  }, [effectiveLayers, textureVersion]);
-
-  // Free-form decal positioning. When the user drags the design across the
-  // body mesh we override the placement preset's position only — rotation
-  // is auto-oriented to the surface normal by drei's Decal, so drag never
-  // tilts the design unexpectedly. User in-plane roll is on the layer.
+  // Free-form decal placement. When the user drags the design across the
+  // shirt, we override the placement preset with a custom (position, rotation)
+  // computed from the raycast hit. Reset whenever the design changes (new
+  // upload) or the user picks a different placement preset.
   const [customDecal, setCustomDecal] = useState<{
     position: [number, number, number];
+    rotation: [number, number, number];
   } | null>(null);
   const [isDraggingDecal, setIsDraggingDecal] = useState(false);
   const [hasMovedDecal, setHasMovedDecal] = useState(false);
@@ -851,25 +504,16 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
           <Center>
             <Model
               colorHex={colorHex}
-              trimColorHex={trimColorHex}
               modelPath={modelPath}
               activePlacement={activePlacement}
-              uploadTexture={uploadTexture}
-              layers={renderedLayers}
+              uploadTexture={activeDecalTexture}
               customDecal={customDecal}
               onCustomDecalChange={(t) => {
                 setCustomDecal(t);
                 setHasMovedDecal(true);
-                if (activePlacement && onLayerDrag) onLayerDrag(activePlacement, t);
               }}
-              enableDrag={!!activePlacement && renderedLayers.some((l) => l.placementId === activePlacement)}
+              enableDrag={!!designImageUrl}
               onDragChange={setIsDraggingDecal}
-              onActiveLayerScale={(factor) => {
-                if (activePlacement && onLayerScale) onLayerScale(activePlacement, factor);
-              }}
-              onActiveLayerRotate={(delta) => {
-                if (activePlacement && onLayerRotate) onLayerRotate(activePlacement, delta);
-              }}
             />
           </Center>
           <CameraRig activePlacement={activePlacement} cinematic={cinematic} />
@@ -957,10 +601,9 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
         </>
       )}
 
-      {/* Design-drag hint — appears once a design is applied to the active
-          placement and the user hasn't moved it yet. Cleanly disappears the
-          moment they drag. */}
-      {renderedLayers.some((l) => l.placementId === activePlacement) && !hasMovedDecal && (
+      {/* Design-drag hint — appears once a design is applied and the user
+          hasn't moved it yet. Cleanly disappears the moment they drag. */}
+      {!!designImageUrl && !hasMovedDecal && (
         <div
           className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-none flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-fg/90 backdrop-blur text-white text-[10px] uppercase tracking-[0.22em] font-medium"
         >
