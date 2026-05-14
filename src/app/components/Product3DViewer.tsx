@@ -13,7 +13,26 @@ interface DecalTransform {
   scale: number;
 }
 
-function getPlacementProps(id?: string): DecalTransform | null {
+/**
+ * Public layer shape used by the customize page. Each placement can hold one
+ * layer; the viewer renders all visible layers as separate <Decal> children
+ * so users can have e.g. a small logo on the chest AND a big graphic on the
+ * back at the same time.
+ */
+export interface DesignLayer {
+  id: string;
+  placementId: string;
+  imageUrl: string;
+  source: "ai" | "upload" | "stock" | "text";
+  /** Optional scale override; falls back to placement preset. */
+  scale?: number;
+  /** When set, overrides the placement preset position/rotation (from drag). */
+  customPosition?: [number, number, number];
+  customRotation?: [number, number, number];
+  hidden?: boolean;
+}
+
+export function getPlacementProps(id?: string): DecalTransform | null {
   switch (id) {
     case "chest_left":       return { position: [0.11, 0.07, 0.15], rotation: [0, 0, 0], scale: 0.14 };
     case "chest_center":     return { position: [0, 0.09, 0.15], rotation: [0, 0, 0], scale: 0.18 };
@@ -21,17 +40,32 @@ function getPlacementProps(id?: string): DecalTransform | null {
     case "back":             return { position: [0, 0, -0.165], rotation: [0, Math.PI, 0], scale: 0.38 };
     case "sleeve_left_top":  return { position: [0.24, 0.08, 0.05], rotation: [0, Math.PI / 2.5, 0], scale: 0.12 };
     case "sleeve_right_top": return { position: [-0.24, 0.08, 0.05], rotation: [0, -Math.PI / 2.5, 0], scale: 0.12 };
+    // Outside label sits on the back-yoke just below the collar — small
+    // printed care/brand mark. Inside label is the neck-tape interior; we
+    // approximate it on the inside-back of the collar area since the GLB
+    // doesn't expose a separate interior mesh.
+    case "label_outside":    return { position: [0, 0.14, -0.16], rotation: [0, Math.PI, 0], scale: 0.06 };
+    case "label_inside":     return { position: [0, 0.155, -0.155], rotation: [0, Math.PI, 0], scale: 0.05 };
     default: return null;
   }
+}
+
+interface RenderedLayer {
+  id: string;
+  placementId: string;
+  texture: THREE.Texture;
+  transform: DecalTransform;
 }
 
 interface ModelProps {
   colorHex: string;
   modelPath: string;
   activePlacement?: string;
+  /** Placeholder texture shown when no layer exists for the active placement. */
   uploadTexture: THREE.Texture;
-  /** When set, overrides the placement preset (only position+rotation; scale
-   *  comes from the active placement so the design doesn't resize on drag). */
+  /** All layers to render. Each will be drawn as its own <Decal>. */
+  layers: RenderedLayer[];
+  /** When set, overrides the active layer's preset position/rotation. */
   customDecal: { position: [number, number, number]; rotation: [number, number, number] } | null;
   /** Fired when user drags the design across the body mesh. */
   onCustomDecalChange: (t: { position: [number, number, number]; rotation: [number, number, number] }) => void;
@@ -47,6 +81,7 @@ function Model({
   modelPath,
   activePlacement,
   uploadTexture,
+  layers,
   customDecal,
   onCustomDecalChange,
   enableDrag,
@@ -76,18 +111,6 @@ function Model({
       document.body.style.cursor = "auto";
     };
   }, [enableDrag]);
-
-  // Decal sourcing — custom drag position wins over placement preset, but the
-  // scale stays whatever the active placement defines so the design doesn't
-  // unexpectedly resize when dragged.
-  const placementProps = getPlacementProps(activePlacement);
-  const decalProps: DecalTransform | null = customDecal
-    ? {
-        position: customDecal.position,
-        rotation: customDecal.rotation,
-        scale: placementProps?.scale ?? 0.22,
-      }
-    : placementProps;
 
   // Convert a raycast hit to a (localPosition, localRotation) tuple. The
   // rotation aligns the decal's local Z with the surface normal at the hit
@@ -141,19 +164,39 @@ function Model({
     if (!draggingRef.current) document.body.style.cursor = "auto";
   };
 
+  // Identify the "body" mesh — the largest mesh in the scene that carries the
+  // garment surface. We rank candidates by vertex count + name heuristics so
+  // this works across our authored GLBs (Cloth_mesh, *_mesh, BindedTrim_*).
+  // Previous heuristics matched on names like "shirt"/"Mesh" that never
+  // appear in our files, so the decal silently failed to render.
+  const bodyMeshName = useMemo(() => {
+    const entries = Object.entries(nodes) as Array<[string, any]>;
+    const meshes = entries.filter(([, n]) => n?.isMesh && n.geometry);
+    if (meshes.length === 0) return null;
+    const score = (name: string, node: any) => {
+      const lc = name.toLowerCase();
+      let s = node.geometry?.attributes?.position?.count ?? 0;
+      // Bias toward the canonical garment surface.
+      if (lc.includes("cloth")) s *= 4;
+      if (lc.includes("shirt") || lc.includes("body") || lc.includes("garment") || lc.includes("fabric")) s *= 4;
+      // Penalise obvious trim/seam/zipper sub-meshes so they never win.
+      if (lc.includes("trim") || lc.includes("seam") || lc.includes("zipper") || lc.includes("button") || lc.includes("label")) s *= 0.05;
+      return s;
+    };
+    let best = meshes[0];
+    let bestScore = score(meshes[0][0], meshes[0][1]);
+    for (let i = 1; i < meshes.length; i++) {
+      const s = score(meshes[i][0], meshes[i][1]);
+      if (s > bestScore) { best = meshes[i]; bestScore = s; }
+    }
+    return best[0];
+  }, [nodes]);
+
   return (
     <group ref={groupRef}>
       {Object.entries(nodes).map(([name, node]: [string, any]) => {
         if (!node.isMesh) return null;
-
-        // Very permissive body detection
-        const isBody = name.toLowerCase().includes('shirt') ||
-                       name.toLowerCase().includes('body') ||
-                       name.toLowerCase().includes('fabric') ||
-                       name.includes('Object_4') ||
-                       name.includes('Mesh') ||
-                       name.toLowerCase().includes('garment');
-
+        const isBody = name === bodyMeshName;
         return (
           <mesh
             key={name}
@@ -170,16 +213,45 @@ function Model({
             onPointerOver={isBody ? handlePointerOver : undefined}
             onPointerOut={isBody ? handlePointerOut : undefined}
           >
-            {isBody && decalProps && (
+            {isBody && layers.map((layer) => {
+              // The active layer is the one the user is currently dragging,
+              // so honour the customDecal override (set from a pointer raycast).
+              const isActive = layer.placementId === activePlacement;
+              const t = isActive && customDecal
+                ? { position: customDecal.position, rotation: customDecal.rotation, scale: layer.transform.scale }
+                : layer.transform;
+              return (
+                <Decal
+                  key={layer.id}
+                  position={t.position as any}
+                  rotation={t.rotation as any}
+                  scale={t.scale as any}
+                  map={layer.texture}
+                >
+                  <meshStandardMaterial
+                    map={layer.texture}
+                    transparent
+                    polygonOffset
+                    polygonOffsetFactor={-10 - layers.indexOf(layer)}
+                    depthTest={true}
+                  />
+                </Decal>
+              );
+            })}
+
+            {/* When there's no layer for the active placement, render a faded
+                placeholder so the user knows where the design will land. */}
+            {isBody && activePlacement && !layers.some(l => l.placementId === activePlacement) && getPlacementProps(activePlacement) && (
               <Decal
-                position={decalProps.position as any}
-                rotation={decalProps.rotation as any}
-                scale={decalProps.scale as any}
+                position={getPlacementProps(activePlacement)!.position as any}
+                rotation={getPlacementProps(activePlacement)!.rotation as any}
+                scale={getPlacementProps(activePlacement)!.scale as any}
                 map={uploadTexture}
               >
                 <meshStandardMaterial
                   map={uploadTexture}
                   transparent
+                  opacity={0.55}
                   polygonOffset
                   polygonOffsetFactor={-10}
                   depthTest={true}
@@ -259,9 +331,20 @@ interface Product3DViewerProps {
   /**
    * Optional image URL (data URL or http) to use as the decal texture in
    * place of the default "Upload design" placeholder. Used by the AI prompt
-   * bar to apply a generated design onto the active placement.
+   * bar to apply a generated design onto the active placement. Legacy
+   * single-layer API — prefer `layers` for multi-placement customization.
    */
   designImageUrl?: string | null;
+  /**
+   * Full multi-placement layer stack. Each entry renders as a separate
+   * <Decal> on the body mesh. Overrides `designImageUrl` when provided.
+   */
+  layers?: DesignLayer[];
+  /**
+   * Fired when the user drags the active layer across the body mesh. Lets
+   * the parent persist the new position/rotation back into the layer model.
+   */
+  onLayerDrag?: (placementId: string, t: { position: [number, number, number]; rotation: [number, number, number] }) => void;
 }
 
 /** Imperative API exposed via ref. Lets the parent grab a PNG snapshot of the
@@ -292,6 +375,8 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
   zoom,
   resetSignal,
   designImageUrl,
+  layers,
+  onLayerDrag,
 }, ref) {
   // Wrapper ref — used to find the underlying canvas DOM for snapshots.
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -327,42 +412,94 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
     return tex;
   }, []);
 
-  // When the parent supplies a design image (e.g. from the AI prompt bar),
-  // load it as a Three texture and feed it to the Decal in place of the
-  // default placeholder. Texture lifecycle is tied to the URL — we dispose
-  // the old one whenever a new design lands.
-  const [designTexture, setDesignTexture] = useState<THREE.Texture | null>(null);
-  useEffect(() => {
-    if (!designImageUrl) {
-      setDesignTexture((prev) => {
-        prev?.dispose();
-        return null;
-      });
-      return;
+  // Effective layer list — if the parent uses the new `layers` API we honour
+  // that directly; otherwise we synthesise a single layer from the legacy
+  // `designImageUrl` prop so existing callers (PDP gallery) keep working.
+  const effectiveLayers = useMemo<DesignLayer[]>(() => {
+    if (layers && layers.length > 0) return layers.filter((l) => !l.hidden);
+    if (designImageUrl) {
+      return [{
+        id: "legacy-single",
+        placementId: activePlacement ?? "chest_center",
+        imageUrl: designImageUrl,
+        source: "ai",
+      }];
     }
+    return [];
+  }, [layers, designImageUrl, activePlacement]);
+
+  // Cache of THREE.Texture instances keyed by source URL so we don't
+  // re-decode the same image when the user switches placements. Old textures
+  // are disposed when their URL leaves the cache (URL change or unmount).
+  const textureCacheRef = useRef<Map<string, THREE.Texture>>(new Map());
+  const [textureVersion, setTextureVersion] = useState(0);
+
+  useEffect(() => {
+    const cache = textureCacheRef.current;
+    const wanted = new Set(effectiveLayers.map((l) => l.imageUrl));
+    // Dispose textures no longer referenced by any layer.
+    for (const [url, tex] of cache) {
+      if (!wanted.has(url)) {
+        tex.dispose();
+        cache.delete(url);
+      }
+    }
+    // Load any wanted URLs we haven't cached yet.
+    let cancelled = false;
     const loader = new THREE.TextureLoader();
     loader.crossOrigin = "anonymous";
-    loader.load(
-      designImageUrl,
-      (tex) => {
-        tex.anisotropy = 16;
-        // Premultiplied alpha so transparent edges blend cleanly on the garment
-        tex.colorSpace = THREE.SRGBColorSpace;
-        setDesignTexture((prev) => {
-          prev?.dispose();
-          return tex;
-        });
-      },
-      undefined,
-      (err) => {
-        if (import.meta.env.DEV) {
-          console.error("[Product3DViewer] design texture load failed", err);
-        }
-      },
-    );
-  }, [designImageUrl]);
+    let pending = 0;
+    for (const url of wanted) {
+      if (cache.has(url)) continue;
+      pending++;
+      loader.load(
+        url,
+        (tex) => {
+          if (cancelled) { tex.dispose(); return; }
+          tex.anisotropy = 16;
+          tex.colorSpace = THREE.SRGBColorSpace;
+          cache.set(url, tex);
+          setTextureVersion((v) => v + 1);
+        },
+        undefined,
+        (err) => {
+          if (import.meta.env.DEV) console.error("[Product3DViewer] texture load failed", url, err);
+        },
+      );
+    }
+    if (pending === 0) setTextureVersion((v) => v + 1); // trigger re-render when cache shrinks
+    return () => { cancelled = true; };
+  }, [effectiveLayers]);
 
-  const activeDecalTexture = designTexture ?? uploadTexture;
+  // Dispose remaining textures on unmount.
+  useEffect(() => () => {
+    const cache = textureCacheRef.current;
+    for (const tex of cache.values()) tex.dispose();
+    cache.clear();
+  }, []);
+
+  // Resolve effective layers into renderable form (with texture + transform).
+  const renderedLayers = useMemo<RenderedLayer[]>(() => {
+    void textureVersion; // dep so we re-resolve when textures finish loading
+    const cache = textureCacheRef.current;
+    return effectiveLayers
+      .map((l) => {
+        const tex = cache.get(l.imageUrl);
+        if (!tex) return null;
+        const preset = getPlacementProps(l.placementId) ?? { position: [0, 0, 0.15] as [number,number,number], rotation: [0,0,0] as [number,number,number], scale: 0.2 };
+        return {
+          id: l.id,
+          placementId: l.placementId,
+          texture: tex,
+          transform: {
+            position: l.customPosition ?? preset.position,
+            rotation: l.customRotation ?? preset.rotation,
+            scale: l.scale ?? preset.scale,
+          },
+        } as RenderedLayer;
+      })
+      .filter((x): x is RenderedLayer => x !== null);
+  }, [effectiveLayers, textureVersion]);
 
   // Free-form decal placement. When the user drags the design across the
   // shirt, we override the placement preset with a custom (position, rotation)
@@ -506,13 +643,15 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
               colorHex={colorHex}
               modelPath={modelPath}
               activePlacement={activePlacement}
-              uploadTexture={activeDecalTexture}
+              uploadTexture={uploadTexture}
+              layers={renderedLayers}
               customDecal={customDecal}
               onCustomDecalChange={(t) => {
                 setCustomDecal(t);
                 setHasMovedDecal(true);
+                if (activePlacement && onLayerDrag) onLayerDrag(activePlacement, t);
               }}
-              enableDrag={!!designImageUrl}
+              enableDrag={!!activePlacement && renderedLayers.some((l) => l.placementId === activePlacement)}
               onDragChange={setIsDraggingDecal}
             />
           </Center>
@@ -601,9 +740,10 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
         </>
       )}
 
-      {/* Design-drag hint — appears once a design is applied and the user
-          hasn't moved it yet. Cleanly disappears the moment they drag. */}
-      {!!designImageUrl && !hasMovedDecal && (
+      {/* Design-drag hint — appears once a design is applied to the active
+          placement and the user hasn't moved it yet. Cleanly disappears the
+          moment they drag. */}
+      {renderedLayers.some((l) => l.placementId === activePlacement) && !hasMovedDecal && (
         <div
           className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-none flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-fg/90 backdrop-blur text-white text-[10px] uppercase tracking-[0.22em] font-medium"
         >

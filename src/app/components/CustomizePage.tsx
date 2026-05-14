@@ -4,7 +4,7 @@ import { Suspense, useEffect, useMemo, useRef, useState, Component, ReactNode, l
 import { motion, AnimatePresence } from "motion/react";
 import { findProduct, products } from "./products";
 import type { SizeCode } from "./products";
-import type { Product3DViewerHandle } from "./Product3DViewer";
+import type { Product3DViewerHandle, DesignLayer } from "./Product3DViewer";
 const Product3DViewer = lazy(() => import("./Product3DViewer"));
 // Inlined so we don't pull the 3D module into this page's static graph. The
 // canonical value still lives in Product3DViewer.tsx; keep them in sync.
@@ -88,11 +88,33 @@ function CustomizePageInner({
   const [zoom, setZoom] = useState(100);
   const [resetSignal, setResetSignal] = useState(0);
 
-  // AI design generation — text prompt → graphic image → applied as decal.
-  const [designUrl, setDesignUrl] = useState<string | null>(null);
+  // Per-placement design layers. Each placement holds at most one layer;
+  // applying a new design to a placement replaces its previous layer.
+  const [layers, setLayers] = useState<DesignLayer[]>([]);
   const [designBusy, setDesignBusy] = useState(false);
   const [designError, setDesignError] = useState<string | null>(null);
   const aiAvailable = isDesignGenConfigured();
+
+  /** Upsert a layer at the active placement. Replaces an existing layer at
+   *  the same placement so users get the obvious "newest wins" behaviour. */
+  const applyLayerAtActivePlacement = (
+    imageUrl: string,
+    source: DesignLayer["source"],
+  ) => {
+    setLayers((prev) => {
+      const without = prev.filter((l) => l.placementId !== activePlacement);
+      const layer: DesignLayer = {
+        id: `${activePlacement}-${Date.now()}`,
+        placementId: activePlacement,
+        imageUrl,
+        source,
+      };
+      return [...without, layer];
+    });
+  };
+
+  /** Single representative image for the cart thumbnail / draft summary. */
+  const primaryDesignUrl: string | null = layers[layers.length - 1]?.imageUrl ?? null;
 
   // Immersive view modals (mirrored from PDP)
   const [arOpen, setArOpen] = useState(false);
@@ -107,7 +129,7 @@ function CustomizePageInner({
     // Use the rendered 3D scene only when the customer has actually applied
     // a design. Otherwise the marketing photo is sharper and more useful to
     // the model.
-    const snapshot = designUrl ? viewer3DRef.current?.snapshot() : null;
+    const snapshot = layers.length > 0 ? viewer3DRef.current?.snapshot() : null;
     setTryOnImage(snapshot ?? product.image);
     setTryOnOpen(true);
   };
@@ -122,7 +144,7 @@ function CustomizePageInner({
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === "string") {
-        setDesignUrl(reader.result);
+        applyLayerAtActivePlacement(reader.result, "upload");
         track("design_generated", { product: product.name, source: "upload" });
       }
     };
@@ -208,15 +230,15 @@ function CustomizePageInner({
       octx.fillStyle = "#0a0a0a";
       octx.fillRect(0, 0, out.width, out.height);
       octx.drawImage(canvas, 0, 0);
-      setDesignUrl(out.toDataURL("image/png"));
+      applyLayerAtActivePlacement(out.toDataURL("image/png"), "text");
     } else {
-      setDesignUrl(canvas.toDataURL("image/png"));
+      applyLayerAtActivePlacement(canvas.toDataURL("image/png"), "text");
     }
     track("design_generated", { product: product.name, source: "text" });
   };
 
   const applyStockDesign = (url: string) => {
-    setDesignUrl(url);
+    applyLayerAtActivePlacement(url, "stock");
     track("design_generated", { product: product.name, source: "stock" });
   };
 
@@ -247,6 +269,10 @@ function CustomizePageInner({
         size?: string;
         quantity?: number;
         placement?: string;
+        // New (multi-layer) format
+        layers?: DesignLayer[];
+        // Legacy (single-design) format — kept for back-compat with drafts
+        // saved before slice-1 introduced per-placement layers.
         designUrl?: string | null;
       };
       if (draft.color && product.colors.some((c) => c.name === draft.color)) {
@@ -261,7 +287,19 @@ function CustomizePageInner({
       if (draft.placement && placements.some((p) => p.id === draft.placement)) {
         setActivePlacement(draft.placement);
       }
-      if (draft.designUrl) setDesignUrl(draft.designUrl);
+      if (Array.isArray(draft.layers) && draft.layers.length > 0) {
+        // New draft format — multiple per-placement layers preserved verbatim.
+        setLayers(draft.layers as DesignLayer[]);
+      } else if (draft.designUrl) {
+        // Legacy draft format from before multi-layer support — fall back to a
+        // single layer at the saved placement.
+        setLayers([{
+          id: `${draft.placement ?? activePlacement}-legacy`,
+          placementId: draft.placement ?? activePlacement,
+          imageUrl: draft.designUrl,
+          source: "upload",
+        }]);
+      }
       toast("Draft restored", {
         description: "We brought back your last customization for this product.",
       });
@@ -273,16 +311,17 @@ function CustomizePageInner({
   }, [product.id]);
 
   const handleAddToCart = () => {
+    const hasCustom = layers.length > 0;
     addToCart({
-      // Each customized variant is its own cart line — include placement and
-      // a hash of the design so users can stack multiple designs of the same
-      // product/color/size without them collapsing into one line.
-      id: designUrl
-        ? `${product.id}::${activeColor.name}::${selectedSize}::${activePlacement}::custom-${Date.now()}`
+      // Each customized variant is its own cart line. Including a custom-
+      // suffix when there's at least one design ensures multiple distinct
+      // customizations of the same product/color/size stack as separate lines.
+      id: hasCustom
+        ? `${product.id}::${activeColor.name}::${selectedSize}::custom-${Date.now()}`
         : undefined,
       productId: product.id,
-      name: designUrl ? `${product.name} · Custom` : product.name,
-      image: designUrl ?? product.image,
+      name: hasCustom ? `${product.name} · Custom` : product.name,
+      image: primaryDesignUrl ?? product.image,
       color: activeColor.name,
       colorHex: activeColor.hex,
       size: selectedSize,
@@ -293,11 +332,12 @@ function CustomizePageInner({
     track("customize_add_to_cart", {
       product_id: product.id,
       placement: activePlacement,
-      has_design: Boolean(designUrl),
+      has_design: hasCustom,
+      layer_count: layers.length,
       quantity,
     });
     toast.success("Added to bag", {
-      description: `${product.name} · ${activeColor.name} · ${selectedSize} · ×${quantity}`,
+      description: `${product.name} · ${activeColor.name} · ${selectedSize} · ×${quantity}${hasCustom ? ` · ${layers.length} design${layers.length === 1 ? "" : "s"}` : ""}`,
     });
     onOpenCart();
   };
@@ -310,11 +350,11 @@ function CustomizePageInner({
         size: selectedSize,
         quantity,
         placement: activePlacement,
-        designUrl,
+        layers,
         savedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
-      track("customize_save_draft", { product_id: product.id });
+      track("customize_save_draft", { product_id: product.id, layer_count: layers.length });
       toast.success("Draft saved", {
         description: "Pick up where you left off next time you open this product.",
       });
@@ -338,7 +378,7 @@ function CustomizePageInner({
         category: product.category,
         placement: activePlacement,
       });
-      setDesignUrl(result.imageDataUrl);
+      applyLayerAtActivePlacement(result.imageDataUrl, "ai");
       track("design_generated", { product: product.name, placement: activePlacement });
       // Auto-switch the sidebar to AI so the user knows where the design came
       // from. Subtle context-cue.
@@ -351,10 +391,36 @@ function CustomizePageInner({
     }
   };
 
-  const clearDesign = () => {
-    setDesignUrl(null);
+  /** Remove only the layer at the active placement (per-placement clear). */
+  const clearActivePlacementLayer = () => {
+    setLayers((prev) => prev.filter((l) => l.placementId !== activePlacement));
     setDesignError(null);
   };
+
+  /** Remove a specific layer by id (used by the Layers panel). */
+  const removeLayer = (layerId: string) => {
+    setLayers((prev) => prev.filter((l) => l.id !== layerId));
+  };
+
+  /** Toggle a layer's visibility without removing it (Layers panel eye icon). */
+  const toggleLayerHidden = (layerId: string) => {
+    setLayers((prev) => prev.map((l) => l.id === layerId ? { ...l, hidden: !l.hidden } : l));
+  };
+
+  /** Clear every layer at once. */
+  const clearAllLayers = () => {
+    setLayers([]);
+    setDesignError(null);
+  };
+
+  /** Selecting a layer in the Layers panel switches the active placement to it. */
+  const selectLayer = (layerId: string) => {
+    const layer = layers.find((l) => l.id === layerId);
+    if (layer) setActivePlacement(layer.placementId);
+  };
+
+  /** Backward-compat alias used by older call sites in this file. */
+  const clearDesign = clearActivePlacementLayer;
 
   const sidebarTools: { id: ToolId; icon: ReactNode; label: string }[] = [
     { id: "ai", icon: <Sparkles size={17} strokeWidth={1.6} />, label: "AI" },
@@ -423,11 +489,18 @@ function CustomizePageInner({
               <ToolPanel
                 activeTool={activeTool}
                 product={product}
-                designUrl={designUrl}
+                designUrl={primaryDesignUrl}
+                layers={layers}
+                placements={placements}
+                activePlacement={activePlacement}
+                onSelectLayer={selectLayer}
+                onToggleLayerHidden={toggleLayerHidden}
+                onRemoveLayer={removeLayer}
+                onClearAllLayers={clearAllLayers}
                 onUpload={handleUploadClick}
                 onApplyStock={applyStockDesign}
                 onApplyText={applyTextDesign}
-                onClearDesign={() => setDesignUrl(null)}
+                onClearDesign={clearActivePlacementLayer}
                 onClose={() => setActiveTool("ai")}
               />
             </div>
@@ -469,11 +542,18 @@ function CustomizePageInner({
               <ToolPanel
                 activeTool={activeTool}
                 product={product}
-                designUrl={designUrl}
+                designUrl={primaryDesignUrl}
+                layers={layers}
+                placements={placements}
+                activePlacement={activePlacement}
+                onSelectLayer={selectLayer}
+                onToggleLayerHidden={toggleLayerHidden}
+                onRemoveLayer={removeLayer}
+                onClearAllLayers={clearAllLayers}
                 onUpload={handleUploadClick}
                 onApplyStock={applyStockDesign}
                 onApplyText={applyTextDesign}
-                onClearDesign={() => setDesignUrl(null)}
+                onClearDesign={clearActivePlacementLayer}
                 onClose={() => setActiveTool("ai")}
               />
             </motion.div>
@@ -623,7 +703,18 @@ function CustomizePageInner({
                   zoom={zoom}
                   resetSignal={resetSignal}
                   activePlacement={activePlacement}
-                  designImageUrl={designUrl}
+                  layers={layers}
+                  onLayerDrag={(placementId, t) => {
+                    // Persist the drag back into the layer so the position is
+                    // remembered after the user lets go and across re-renders.
+                    setLayers((prev) =>
+                      prev.map((l) =>
+                        l.placementId === placementId
+                          ? { ...l, customPosition: t.position, customRotation: t.rotation }
+                          : l,
+                      ),
+                    );
+                  }}
                 />
               </Suspense>
             </ModelErrorBoundary>
@@ -688,8 +779,8 @@ function CustomizePageInner({
                 <PromptBar
                   onSubmit={handlePromptSubmit}
                   busy={designBusy}
-                  generatedUrl={designUrl}
-                  onClear={clearDesign}
+                  generatedUrl={primaryDesignUrl}
+                  onClear={clearActivePlacementLayer}
                   error={designError}
                 />
               )}
@@ -952,6 +1043,13 @@ interface ToolPanelProps {
   activeTool: ToolId;
   product: Product;
   designUrl: string | null;
+  layers: DesignLayer[];
+  placements: Array<{ id: string; label: string }>;
+  activePlacement: string;
+  onSelectLayer: (layerId: string) => void;
+  onToggleLayerHidden: (layerId: string) => void;
+  onRemoveLayer: (layerId: string) => void;
+  onClearAllLayers: () => void;
   onUpload: () => void;
   onApplyStock: (url: string) => void;
   onApplyText: (text: string, weight: 400 | 500 | 600, dark: boolean) => void;
@@ -962,6 +1060,13 @@ interface ToolPanelProps {
 function ToolPanel({
   activeTool,
   designUrl,
+  layers,
+  placements,
+  activePlacement,
+  onSelectLayer,
+  onToggleLayerHidden,
+  onRemoveLayer,
+  onClearAllLayers,
   onUpload,
   onApplyStock,
   onApplyText,
@@ -997,7 +1102,17 @@ function ToolPanel({
         {activeTool === "upload" && <UploadPanel onUpload={onUpload} designUrl={designUrl} onClear={onClearDesign} />}
         {activeTool === "stock" && <StockPanel onApply={onApplyStock} />}
         {activeTool === "text" && <TextPanel onApply={onApplyText} />}
-        {activeTool === "layers" && <LayersPanel designUrl={designUrl} onClear={onClearDesign} />}
+        {activeTool === "layers" && (
+          <LayersPanel
+            layers={layers}
+            placements={placements}
+            activePlacement={activePlacement}
+            onSelect={onSelectLayer}
+            onToggleHidden={onToggleLayerHidden}
+            onRemove={onRemoveLayer}
+            onClearAll={onClearAllLayers}
+          />
+        )}
       </div>
     </div>
   );
@@ -1176,40 +1291,106 @@ function TextPanel({
 }
 
 function LayersPanel({
-  designUrl,
-  onClear,
+  layers,
+  placements,
+  activePlacement,
+  onSelect,
+  onToggleHidden,
+  onRemove,
+  onClearAll,
 }: {
-  designUrl: string | null;
-  onClear: () => void;
+  layers: DesignLayer[];
+  placements: Array<{ id: string; label: string }>;
+  activePlacement: string;
+  onSelect: (layerId: string) => void;
+  onToggleHidden: (layerId: string) => void;
+  onRemove: (layerId: string) => void;
+  onClearAll: () => void;
 }) {
-  if (!designUrl) {
+  if (layers.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center text-center gap-3 py-12">
         <Layers size={22} strokeWidth={1.4} className="text-fg-faint" />
-        <p className="text-meta text-fg-mute leading-relaxed max-w-[200px]">
-          No design yet. Pick a tool to start.
+        <p className="text-meta text-fg-mute leading-relaxed max-w-[220px]">
+          No designs yet. Pick a placement, then add a design with AI, Upload, Stock or Text.
         </p>
       </div>
     );
   }
+  const labelFor = (id: string) => placements.find((p) => p.id === id)?.label ?? id;
+  const sourceLabel: Record<DesignLayer["source"], string> = {
+    ai: "AI",
+    upload: "Upload",
+    stock: "Stock",
+    text: "Text",
+  };
   return (
-    <div className="flex flex-col gap-4">
-      <span className="text-eyebrow uppercase tracking-[0.22em] text-fg-faint">Active layer</span>
-      <div className="flex items-center gap-3 p-3 rounded-xl border border-black/10">
-        <div className="size-12 rounded-lg overflow-hidden bg-[#f5f5f5] border border-black/5 shrink-0">
-          <img src={designUrl} alt="" className="w-full h-full object-contain" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-meta font-medium text-fg leading-tight">Design</p>
-          <p className="text-caption text-fg-faint">Applied to selected placement</p>
-        </div>
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <span className="text-eyebrow uppercase tracking-[0.22em] text-fg-faint">
+          {layers.length} layer{layers.length === 1 ? "" : "s"}
+        </span>
+        {layers.length > 1 && (
+          <button
+            onClick={onClearAll}
+            className="text-caption text-fg-mute hover:text-fg underline underline-offset-4"
+          >
+            Clear all
+          </button>
+        )}
       </div>
-      <button
-        onClick={onClear}
-        className="h-10 rounded-full border border-black/10 text-meta text-fg-mute hover:border-fg hover:text-fg transition-colors"
-      >
-        Remove design
-      </button>
+      <div className="flex flex-col gap-2">
+        {layers.map((layer) => {
+          const isActive = layer.placementId === activePlacement;
+          return (
+            <div
+              key={layer.id}
+              className={`group flex items-center gap-3 p-2.5 rounded-xl border transition-colors ${
+                isActive ? "border-fg bg-black/[0.02]" : "border-black/10 hover:border-black/30"
+              } ${layer.hidden ? "opacity-50" : ""}`}
+            >
+              <button
+                onClick={() => onSelect(layer.id)}
+                className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                title={`Edit ${labelFor(layer.placementId)}`}
+              >
+                <div className="size-11 rounded-lg overflow-hidden bg-[#f5f5f5] border border-black/5 shrink-0">
+                  <img src={layer.imageUrl} alt="" className="w-full h-full object-contain" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-meta font-medium text-fg leading-tight truncate">
+                    {labelFor(layer.placementId)}
+                  </p>
+                  <p className="text-caption text-fg-faint">
+                    {sourceLabel[layer.source]}{isActive ? " · editing" : ""}
+                  </p>
+                </div>
+              </button>
+              <button
+                onClick={() => onToggleHidden(layer.id)}
+                aria-label={layer.hidden ? "Show layer" : "Hide layer"}
+                title={layer.hidden ? "Show" : "Hide"}
+                className="size-7 rounded-full hover:bg-black/[0.05] flex items-center justify-center text-fg-mute hover:text-fg transition-colors shrink-0"
+              >
+                <span aria-hidden className="text-[14px] leading-none">
+                  {layer.hidden ? "○" : "●"}
+                </span>
+              </button>
+              <button
+                onClick={() => onRemove(layer.id)}
+                aria-label="Remove layer"
+                title="Remove"
+                className="size-7 rounded-full hover:bg-red-500/10 flex items-center justify-center text-fg-mute hover:text-red-500 transition-colors shrink-0"
+              >
+                <X size={13} strokeWidth={1.8} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+      <p className="text-caption text-fg-faint mt-1 leading-relaxed">
+        Tap a layer to switch to that placement. Hide / remove individually, or Clear all to start over.
+      </p>
     </div>
   );
 }
