@@ -83,6 +83,9 @@ function CustomizePageInner({
 
   const [activeTool, setActiveTool] = useState<ToolId>("ai");
   const [selectedColor, setSelectedColor] = useState(product.colors[0].name);
+  // Trim color picker — independent of body color. `null` means "match body"
+  // which keeps the legacy one-color appearance for users who don't engage.
+  const [trimColor, setTrimColor] = useState<string | null>(null);
   const [selectedSize, setSelectedSize] = useState(product.sizes[0]);
   const [quantity, setQuantity] = useState(product.moq || 25);
   const [zoom, setZoom] = useState(100);
@@ -311,6 +314,7 @@ function CustomizePageInner({
       if (!raw) return;
       const draft = JSON.parse(raw) as {
         color?: string;
+        trimColor?: string | null;
         size?: string;
         quantity?: number;
         placement?: string;
@@ -322,6 +326,9 @@ function CustomizePageInner({
       };
       if (draft.color && product.colors.some((c) => c.name === draft.color)) {
         setSelectedColor(draft.color);
+      }
+      if (draft.trimColor && product.colors.some((c) => c.name === draft.trimColor)) {
+        setTrimColor(draft.trimColor);
       }
       if (draft.size && product.sizes.includes(draft.size as SizeCode)) {
         setSelectedSize(draft.size as SizeCode);
@@ -392,6 +399,7 @@ function CustomizePageInner({
       const draft = {
         productId: product.id,
         color: activeColor.name,
+        trimColor,
         size: selectedSize,
         quantity,
         placement: activePlacement,
@@ -868,6 +876,7 @@ function CustomizePageInner({
                 <Product3DViewer
                   ref={viewer3DRef}
                   colorHex={activeColor.hex}
+                  trimColorHex={trimColor ? (product.colors.find((c) => c.name === trimColor)?.hex ?? null) : null}
                   modelPath={product.modelPath}
                   showControlsLayout={false}
                   zoom={zoom}
@@ -1025,6 +1034,8 @@ function CustomizePageInner({
                 product={product}
                 selectedColor={selectedColor}
                 onSelectColor={setSelectedColor}
+                trimColor={trimColor}
+                onSelectTrimColor={setTrimColor}
                 selectedSize={selectedSize}
                 onSelectSize={setSelectedSize}
                 quantity={quantity}
@@ -1143,6 +1154,9 @@ interface ConfigDockProps {
   product: Product;
   selectedColor: string;
   onSelectColor: (name: string) => void;
+  /** When null the trim matches the body. */
+  trimColor: string | null;
+  onSelectTrimColor: (name: string | null) => void;
   selectedSize: string;
   onSelectSize: (size: SizeCode) => void;
   quantity: number;
@@ -1156,6 +1170,8 @@ function ConfigDock({
   product,
   selectedColor,
   onSelectColor,
+  trimColor,
+  onSelectTrimColor,
   selectedSize,
   onSelectSize,
   quantity,
@@ -1164,6 +1180,7 @@ function ConfigDock({
   onVR,
   onTryOn,
 }: ConfigDockProps) {
+  const [trimOpen, setTrimOpen] = useState(false);
   return (
     <motion.div
       initial={{ y: 12, opacity: 0 }}
@@ -1175,7 +1192,7 @@ function ConfigDock({
           horizontally rather than overflow or shrink-clip controls. */}
       <div className="flex items-center gap-3 px-3 py-2 bg-white/95 backdrop-blur-xl border border-black/[0.06] rounded-full shadow-[0_12px_32px_-12px_rgba(0,0,0,0.12)] overflow-x-auto no-scrollbar max-w-full">
         {/* Color — bigger swatches on mobile for tap accuracy */}
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0 relative">
           {product.colors.map((c) => {
             const isActive = selectedColor === c.name;
             return (
@@ -1194,6 +1211,73 @@ function ConfigDock({
               />
             );
           })}
+          {/* Trim color toggle — small "+" puck that opens a popover with the
+              same swatches mapped to the trim. Engages a two-tone garment
+              without cluttering the primary color row. */}
+          <button
+            onClick={() => setTrimOpen((v) => !v)}
+            aria-label="Trim color"
+            aria-pressed={trimOpen}
+            title={trimColor ? `Trim: ${trimColor}` : "Add trim color"}
+            className={`size-8 lg:size-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${
+              trimColor
+                ? "ring-2 ring-fg ring-offset-2 ring-offset-white"
+                : "bg-black/[0.04] hover:bg-black/[0.08]"
+            }`}
+            style={trimColor ? {
+              backgroundColor: product.colors.find((c) => c.name === trimColor)?.hex ?? "#000",
+              boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.08)",
+            } : undefined}
+          >
+            {!trimColor && <span className="text-fg-faint text-[12px] font-semibold leading-none">+</span>}
+          </button>
+          <AnimatePresence>
+            {trimOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: 6 }}
+                transition={{ duration: 0.18 }}
+                className="absolute bottom-full left-0 mb-2 z-40 bg-white border border-black/5 rounded-2xl shadow-[0_12px_32px_-8px_rgba(0,0,0,0.16)] p-3 flex flex-col gap-2 w-[220px]"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[9px] uppercase tracking-[0.22em] font-semibold text-fg-faint">
+                    Trim color
+                  </span>
+                  {trimColor && (
+                    <button
+                      onClick={() => { onSelectTrimColor(null); setTrimOpen(false); }}
+                      className="text-[10px] text-fg-mute hover:text-fg underline underline-offset-4"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-6 gap-1.5">
+                  {product.colors.map((c) => {
+                    const isActive = trimColor === c.name;
+                    return (
+                      <button
+                        key={c.name}
+                        onClick={() => { onSelectTrimColor(c.name); setTrimOpen(false); }}
+                        aria-label={c.name}
+                        title={c.name}
+                        className={`size-7 rounded-full transition-[box-shadow] duration-150 ${
+                          isActive
+                            ? "ring-2 ring-fg ring-offset-2 ring-offset-white"
+                            : "hover:ring-1 hover:ring-black/20 hover:ring-offset-1 hover:ring-offset-white"
+                        }`}
+                        style={{ backgroundColor: c.hex, boxShadow: "inset 0 0 0 1px rgba(0,0,0,0.08)" }}
+                      />
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-fg-faint leading-relaxed">
+                  Paints collar, cuffs, hem and seams independently of the body.
+                </p>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
         <DockDivider />

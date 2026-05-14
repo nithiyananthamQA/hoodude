@@ -59,6 +59,10 @@ interface RenderedLayer {
 
 interface ModelProps {
   colorHex: string;
+  /** Optional second color for trim meshes (collar/cuffs/hem/seams). When
+   *  omitted the trim is painted with `colorHex` so there's no visual change
+   *  for callers that don't opt in. */
+  trimColorHex?: string | null;
   modelPath: string;
   activePlacement?: string;
   /** Placeholder texture shown when no layer exists for the active placement. */
@@ -82,6 +86,7 @@ interface ModelProps {
 
 function Model({
   colorHex,
+  trimColorHex,
   modelPath,
   activePlacement,
   uploadTexture,
@@ -97,18 +102,46 @@ function Model({
   const groupRef = useRef<THREE.Group>(null!);
   const draggingRef = useRef(false);
 
-  // Update color
+  // Identify the "body" mesh — the largest mesh in the scene that carries the
+  // garment surface. We rank candidates by vertex count + name heuristics so
+  // this works across our authored GLBs (Cloth_mesh, *_mesh, BindedTrim_*).
+  const bodyMeshName = useMemo(() => {
+    const entries = Object.entries(nodes) as Array<[string, any]>;
+    const meshes = entries.filter(([, n]) => n?.isMesh && n.geometry);
+    if (meshes.length === 0) return null;
+    const score = (name: string, node: any) => {
+      const lc = name.toLowerCase();
+      let s = node.geometry?.attributes?.position?.count ?? 0;
+      if (lc.includes("cloth")) s *= 4;
+      if (lc.includes("shirt") || lc.includes("body") || lc.includes("garment") || lc.includes("fabric")) s *= 4;
+      if (lc.includes("trim") || lc.includes("seam") || lc.includes("zipper") || lc.includes("button") || lc.includes("label")) s *= 0.05;
+      return s;
+    };
+    let best = meshes[0];
+    let bestScore = score(meshes[0][0], meshes[0][1]);
+    for (let i = 1; i < meshes.length; i++) {
+      const s = score(meshes[i][0], meshes[i][1]);
+      if (s > bestScore) { best = meshes[i]; bestScore = s; }
+    }
+    return best[0];
+  }, [nodes]);
+
+  // Update color. Body and trim are repainted independently so users can have
+  // (e.g.) a black shirt with a red collar / cuffs. Falls back to colorHex on
+  // every mesh when trimColorHex isn't provided.
   useEffect(() => {
-    const color = new THREE.Color(colorHex);
+    const body = new THREE.Color(colorHex);
+    const trim = new THREE.Color(trimColorHex ?? colorHex);
     scene.traverse((c: any) => {
-      if (c.isMesh && c.material) {
-        c.material.color.set(color);
-        if (c.material.metalness !== undefined) c.material.metalness = 0;
-        if (c.material.roughness !== undefined) c.material.roughness = 0.5;
-        c.material.needsUpdate = true;
-      }
+      if (!c.isMesh || !c.material) return;
+      const isBody = c.name === bodyMeshName;
+      const target = isBody ? body : trim;
+      c.material.color.set(target);
+      if (c.material.metalness !== undefined) c.material.metalness = 0;
+      if (c.material.roughness !== undefined) c.material.roughness = 0.5;
+      c.material.needsUpdate = true;
     });
-  }, [colorHex, scene]);
+  }, [colorHex, trimColorHex, scene, bodyMeshName]);
 
   // Reset cursor when dragging is disabled (e.g. design cleared mid-drag).
   useEffect(() => {
@@ -214,34 +247,6 @@ function Model({
     const factor = e.deltaY < 0 ? 1.05 : 0.95;
     onActiveLayerScale(factor);
   };
-
-  // Identify the "body" mesh — the largest mesh in the scene that carries the
-  // garment surface. We rank candidates by vertex count + name heuristics so
-  // this works across our authored GLBs (Cloth_mesh, *_mesh, BindedTrim_*).
-  // Previous heuristics matched on names like "shirt"/"Mesh" that never
-  // appear in our files, so the decal silently failed to render.
-  const bodyMeshName = useMemo(() => {
-    const entries = Object.entries(nodes) as Array<[string, any]>;
-    const meshes = entries.filter(([, n]) => n?.isMesh && n.geometry);
-    if (meshes.length === 0) return null;
-    const score = (name: string, node: any) => {
-      const lc = name.toLowerCase();
-      let s = node.geometry?.attributes?.position?.count ?? 0;
-      // Bias toward the canonical garment surface.
-      if (lc.includes("cloth")) s *= 4;
-      if (lc.includes("shirt") || lc.includes("body") || lc.includes("garment") || lc.includes("fabric")) s *= 4;
-      // Penalise obvious trim/seam/zipper sub-meshes so they never win.
-      if (lc.includes("trim") || lc.includes("seam") || lc.includes("zipper") || lc.includes("button") || lc.includes("label")) s *= 0.05;
-      return s;
-    };
-    let best = meshes[0];
-    let bestScore = score(meshes[0][0], meshes[0][1]);
-    for (let i = 1; i < meshes.length; i++) {
-      const s = score(meshes[i][0], meshes[i][1]);
-      if (s > bestScore) { best = meshes[i]; bestScore = s; }
-    }
-    return best[0];
-  }, [nodes]);
 
   return (
     <group ref={groupRef}>
@@ -369,6 +374,8 @@ function CameraRig({
 
 interface Product3DViewerProps {
   colorHex: string;
+  /** Optional second color for trim meshes. See Model's trimColorHex prop. */
+  trimColorHex?: string | null;
   modelPath?: string;
   showControlsLayout?: boolean;
   zoom?: number;
@@ -425,6 +432,7 @@ function CanvasLoader() {
 
 const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(function Product3DViewer({
   colorHex,
+  trimColorHex,
   modelPath = DEFAULT_MODEL_PATH,
   showControlsLayout = true,
   activePlacement,
@@ -700,6 +708,7 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
           <Center>
             <Model
               colorHex={colorHex}
+              trimColorHex={trimColorHex}
               modelPath={modelPath}
               activePlacement={activePlacement}
               uploadTexture={uploadTexture}
