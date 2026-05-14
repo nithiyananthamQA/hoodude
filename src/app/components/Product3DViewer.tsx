@@ -133,35 +133,45 @@ function resolvePlacement(
   const zOvershoot = sizeZ * 0.1;
   const xOvershoot = sizeX * 0.06;
 
+  // ⚠️ Rotation values are COUNTER-INTUITIVE for DecalGeometry. The "rotation"
+  // is the projector cube's orientation, and clipping rejects triangles whose
+  // winding/normals don't match the projection direction. Front-facing
+  // triangles need a projector rotated 180° around Y (so the cube's effective
+  // forward direction matches the surface-normal direction at the chest).
+  // Back-facing triangles need the opposite. The "Back works, Front doesn't"
+  // symptom was the original Front rotation `[0,0,0]` being wrong.
   if (isSleeve) {
-    // For sleeves, project from outside the body along the X axis. The
-    // Euler rotates the cube 90° around Y so its local +Z faces ±X.
     xPos = cx + preset.xN * (sizeX / 2 + xOvershoot);
+    // Sleeves project along ±X. The body center Z (0 for these GLBs) is a
+    // safe Z to anchor at since the sleeve geometry passes through there.
     zPos = 0;
+    // Sleeve rotations inverted vs my earlier guess — left sleeve cube
+    // points toward -X (into the body), right sleeve toward +X.
     rotation = preset.xN > 0
-      ? [0, Math.PI / 2, preset.rollZ ?? 0]   // left sleeve: cube faces +X
-      : [0, -Math.PI / 2, preset.rollZ ?? 0]; // right sleeve: cube faces -X
+      ? [0, -Math.PI / 2, preset.rollZ ?? 0]   // left sleeve
+      : [0,  Math.PI / 2, preset.rollZ ?? 0];  // right sleeve
   } else if (preset.zN === 1) {
-    // Front chest: cube positioned in front, faces +Z (no rotation needed
-    // since the cube's local +Z is already aligned with world +Z).
+    // Front chest: projector positioned in front, rotated 180° around Y so
+    // its +Z effective direction matches the front-face normal direction.
     xPos = cx + preset.xN * (sizeX / 2);
     zPos = bounds.max.z + zOvershoot;
-    rotation = [0, 0, preset.rollZ ?? 0];
+    rotation = [0, Math.PI, preset.rollZ ?? 0];
   } else {
-    // Back: cube positioned behind, rotated 180° around Y so its local
-    // +Z faces -Z (so the decal image isn't mirrored).
+    // Back: projector positioned behind, identity rotation (its +Z naturally
+    // matches the back-face normal direction in this GLB's coordinate frame).
     xPos = cx + preset.xN * (sizeX / 2);
     zPos = bounds.min.z - zOvershoot;
-    rotation = [0, Math.PI, preset.rollZ ?? 0];
+    rotation = [0, 0, preset.rollZ ?? 0];
   }
 
   // Cube width/height — bbox-fraction-based so decals stay proportional
   // across different garments.
   const width = sizeX * preset.scaleN;
-  // Cube depth — covers the fabric thickness from "in front of the surface"
-  // through to just past it. Large enough to capture curved torso, small
-  // enough not to project to the opposite side.
-  const depth = sizeZ * 0.6;
+  // Cube depth — KEEP THIS SMALL. Large depths cause DecalGeometry clipping
+  // failures on thin cloth meshes (the cube extends past the fabric on both
+  // sides and the projection produces no triangles). 0.02 = 2cm of model
+  // space, enough for fabric thickness without crossing to the other side.
+  const depth = 0.02;
 
   return {
     position: [xPos, yPos, zPos],
@@ -265,6 +275,13 @@ function Model({
     }
     const bestNode = best[1];
     bestNode.geometry.computeBoundingBox?.();
+    // Authored GLBs frequently have inconsistent / broken normals on the
+    // sleeve and chest regions (UV seam averaging quirks during export).
+    // DecalGeometry's clipping uses normals to reject triangles, so bad
+    // normals cause silent decal failures. Recompute fresh normals once
+    // here so every triangle has a reliable outward-facing normal.
+    bestNode.geometry.computeVertexNormals?.();
+    bestNode.geometry.normalizeNormals?.();
     const box = bestNode.geometry.boundingBox as THREE.Box3 | null;
     if (!box) return { bodyMeshName: best[0], bodyBounds: null };
     const bounds: BodyBounds = { min: box.min.clone(), max: box.max.clone() };
@@ -387,8 +404,28 @@ function Model({
     onActiveLayerScale(factor);
   };
 
+  // Debug mode: append ?debug=1 to the URL to visualise the projector cubes
+  // as red wireframes. Reveals decal direction + clipping volume at a glance.
+  const debugMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("debug") === "1";
+
   return (
     <group ref={groupRef}>
+      {/* Debug: render every placement's projector cube as a red wireframe
+          so we can see where each one is positioned and which way it faces. */}
+      {debugMode && bodyBounds && (
+        <>
+          {(["front_chest", "back", "left_sleeve", "right_sleeve"] as const).map((id) => {
+            const preset = resolvePlacement(id, bodyBounds);
+            if (!preset) return null;
+            return (
+              <mesh key={`debug-${id}`} position={preset.position} rotation={preset.rotation}>
+                <boxGeometry args={preset.scale} />
+                <meshBasicMaterial wireframe color={id === "front_chest" ? "#ff0000" : id === "back" ? "#00ff00" : id === "left_sleeve" ? "#0000ff" : "#ffff00"} />
+              </mesh>
+            );
+          })}
+        </>
+      )}
       {Object.entries(nodes).map(([name, node]: [string, any]) => {
         if (!node.isMesh) return null;
         const isBody = name === bodyMeshName;
@@ -410,9 +447,6 @@ function Model({
             onWheel={isBody ? handleWheel : undefined}
           >
             {isBody && layers.map((layer) => {
-              // Resolve transform from the body bbox so coords work across
-              // all of our authored GLBs (each has a different absolute
-              // coordinate range). User overrides win where present.
               const preset = resolvePlacement(layer.placementId, bodyBounds);
               if (!preset) return null;
               const isActive = layer.placementId === activePlacement;
@@ -444,8 +478,10 @@ function Model({
                     map={layer.texture}
                     transparent
                     polygonOffset
-                    polygonOffsetFactor={-10 - layers.indexOf(layer)}
-                    depthTest={true}
+                    polygonOffsetFactor={-1}
+                    depthTest
+                    depthWrite={false}
+                    side={THREE.DoubleSide}
                   />
                 </Decal>
               );
@@ -468,8 +504,10 @@ function Model({
                     transparent
                     opacity={0.55}
                     polygonOffset
-                    polygonOffsetFactor={-10}
-                    depthTest={true}
+                    polygonOffsetFactor={-1}
+                    depthTest
+                    depthWrite={false}
+                    side={THREE.DoubleSide}
                   />
                 </Decal>
               );
