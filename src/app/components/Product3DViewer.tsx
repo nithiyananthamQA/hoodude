@@ -9,11 +9,14 @@ export const DEFAULT_MODEL_PATH = "/3d/white-tshirt.glb";
 
 interface DecalTransform {
   position: [number, number, number];
-  /** In-plane roll around the surface normal (radians). drei's Decal auto-
-   *  orients to the closest vertex normal when `rotation` is a single
-   *  number, then applies this value as additional Z-roll. This lets the
-   *  decal lay flat on the curved surface AND let users twist it. */
-  rotation: number;
+  /** Explicit Euler [x, y, z] for the projection cube's orientation. We
+   *  used to pass a single number and rely on drei's auto-orient to align
+   *  the cube with the closest vertex normal, but on our authored GLBs
+   *  the chest-area vertex normals point in unexpected directions (seam
+   *  averaging quirks), so the cube ended up oriented sideways and the
+   *  projection missed the front face. Passing an explicit Euler lets us
+   *  hard-orient the cube to face the right way out of the garment. */
+  rotation: [number, number, number];
   /** Vector scale: [width, height, depth-of-projection]. The depth is how
    *  far through the mesh the projection cube extends; keep it small so a
    *  front-placed decal doesn't also paint the back side of the garment. */
@@ -65,10 +68,22 @@ interface PlacementPreset {
 const PLACEMENT_PRESETS: Record<string, PlacementPreset> = {
   // Four zones, simple and obvious. Two-color trim (collar/cuffs/hem) is a
   // separate body+trim color system — not a design placement.
-  front_chest:  { xN:  0,    yN: 0.68, zN:  1, scaleN: 0.45 },
-  back:         { xN:  0,    yN: 0.65, zN: -1, scaleN: 0.55 },
-  left_sleeve:  { xN:  0.85, yN: 0.78, zN:  1, scaleN: 0.18 },
-  right_sleeve: { xN: -0.85, yN: 0.78, zN:  1, scaleN: 0.18 },
+  //
+  // yN values are tuned for our authored garments:
+  //   1.0 = top of bbox (collar / hood top)
+  //   0.85+ = neck opening (no fabric — avoid)
+  //   0.66 = chest line (sweet spot for front + back design)
+  //   0.30 = waist
+  //   0.0 = hem
+  //
+  // For sleeves, xN of ±0.65 lands roughly at the upper-arm sleeve area
+  // (between the shoulder and the cuff). The decal's auto-orient picks the
+  // outward-facing normal of the nearest sleeve vertex, so the decal lays
+  // flat on the sleeve surface even without precise positioning.
+  front_chest:  { xN:  0,    yN: 0.66, zN:  1, scaleN: 0.42 },
+  back:         { xN:  0,    yN: 0.66, zN: -1, scaleN: 0.55 },
+  left_sleeve:  { xN:  0.65, yN: 0.78, zN:  1, scaleN: 0.18 },
+  right_sleeve: { xN: -0.65, yN: 0.78, zN:  1, scaleN: 0.18 },
 };
 
 export function getPlacementPreset(id?: string): PlacementPreset | null {
@@ -81,58 +96,76 @@ interface BodyBounds {
   max: THREE.Vector3;
 }
 
-type AnchorMap = {
-  front_chest:  { position: [number, number, number]; rollZ: number; widthFrac: number } | null;
-  back:         { position: [number, number, number]; rollZ: number; widthFrac: number } | null;
-  left_sleeve:  { position: [number, number, number]; rollZ: number; widthFrac: number } | null;
-  right_sleeve: { position: [number, number, number]; rollZ: number; widthFrac: number } | null;
-};
-
-/** Resolve a placement to absolute mesh-local coordinates using the
- *  raycast-derived anchors (preferred) or falling back to bbox math. */
+/** Resolve a placement to absolute mesh-local coordinates using ONLY the
+ *  body bbox. No raycasting — raycasts were missing for 3 of 4 placements
+ *  on the authored GLBs (the rays passed through the neck opening or
+ *  glanced off the curved sleeve). This bbox-only path always produces a
+ *  valid position, and DecalGeometry's cube projection is forgiving
+ *  enough that small position offsets still capture the surface. */
 function resolvePlacement(
   id: string | undefined,
   bounds: BodyBounds | null,
-  anchors: AnchorMap | null,
 ): DecalTransform | null {
   if (!id || !bounds) return null;
-  const sizeX = bounds.max.x - bounds.min.x;
-  const sizeZ = bounds.max.z - bounds.min.z;
-  // Projection-cube depth — needs to be large enough that the decal isn't
-  // clipped on the curved fabric (back area complaint), but small enough
-  // not to bleed through to the opposite side. ~55% of the bbox depth
-  // gives a clean capture on a curved torso without crossing to the back.
-  const depth = sizeZ * 0.55;
-
-  // Try the raycast anchor first. This is the path that should hit on all
-  // four placements for our authored garments.
-  const anchor = anchors && (anchors as any)[id];
-  if (anchor) {
-    const width = sizeX * anchor.widthFrac;
-    return {
-      position: anchor.position,
-      rotation: anchor.rollZ,
-      scale: [width, width, depth],
-    };
-  }
-
-  // Fallback: bbox-only resolution (used if the raycast missed, which can
-  // happen for non-standard authored geometry).
   const preset = getPlacementPreset(id);
   if (!preset) return null;
-  const cx = (bounds.min.x + bounds.max.x) / 2;
+
+  const sizeX = bounds.max.x - bounds.min.x;
   const sizeY = bounds.max.y - bounds.min.y;
+  const sizeZ = bounds.max.z - bounds.min.z;
+  const cx = (bounds.min.x + bounds.max.x) / 2;
+
   const isSleeve = id === "left_sleeve" || id === "right_sleeve";
-  const xOffsetMul = isSleeve ? 0.65 : 0.5;
-  const position: [number, number, number] = [
-    cx + preset.xN * sizeX * xOffsetMul,
-    bounds.min.y + preset.yN * sizeY,
-    preset.zN === 1 ? bounds.max.z : bounds.min.z,
-  ];
+
+  // Y position — preset.yN is 0..1 normalised from the bbox bottom (hem) to top.
+  const yPos = bounds.min.y + preset.yN * sizeY;
+
+  // X / Z position depends on which face the placement targets:
+  //   - Front chest:  cube faces +Z, sits just in front of the front surface
+  //   - Back:         cube faces -Z, sits just behind the back surface
+  //   - Sleeves:      cube faces ±X, sits just outside the sleeve cuff
+  // The Euler rotation hard-orients the cube's local +Z axis along the
+  // surface normal direction. This avoids drei's auto-orient picking a
+  // wrong-direction vertex normal on chest-seam vertices.
+  let xPos: number;
+  let zPos: number;
+  let rotation: [number, number, number];
+  const zOvershoot = sizeZ * 0.1;
+  const xOvershoot = sizeX * 0.06;
+
+  if (isSleeve) {
+    // For sleeves, project from outside the body along the X axis. The
+    // Euler rotates the cube 90° around Y so its local +Z faces ±X.
+    xPos = cx + preset.xN * (sizeX / 2 + xOvershoot);
+    zPos = 0;
+    rotation = preset.xN > 0
+      ? [0, Math.PI / 2, preset.rollZ ?? 0]   // left sleeve: cube faces +X
+      : [0, -Math.PI / 2, preset.rollZ ?? 0]; // right sleeve: cube faces -X
+  } else if (preset.zN === 1) {
+    // Front chest: cube positioned in front, faces +Z (no rotation needed
+    // since the cube's local +Z is already aligned with world +Z).
+    xPos = cx + preset.xN * (sizeX / 2);
+    zPos = bounds.max.z + zOvershoot;
+    rotation = [0, 0, preset.rollZ ?? 0];
+  } else {
+    // Back: cube positioned behind, rotated 180° around Y so its local
+    // +Z faces -Z (so the decal image isn't mirrored).
+    xPos = cx + preset.xN * (sizeX / 2);
+    zPos = bounds.min.z - zOvershoot;
+    rotation = [0, Math.PI, preset.rollZ ?? 0];
+  }
+
+  // Cube width/height — bbox-fraction-based so decals stay proportional
+  // across different garments.
   const width = sizeX * preset.scaleN;
+  // Cube depth — covers the fabric thickness from "in front of the surface"
+  // through to just past it. Large enough to capture curved torso, small
+  // enough not to project to the opposite side.
+  const depth = sizeZ * 0.6;
+
   return {
-    position,
-    rotation: preset.rollZ ?? 0,
+    position: [xPos, yPos, zPos],
+    rotation,
     scale: [width, width, depth],
   };
 }
@@ -145,7 +178,7 @@ export function getPlacementProps(id?: string): DecalTransform | null {
   if (!preset) return null;
   return {
     position: [preset.xN * 0.15, 0.05, preset.zN === 1 ? 0.15 : -0.15],
-    rotation: preset.rollZ ?? 0,
+    rotation: [0, preset.zN === 1 ? 0 : Math.PI, preset.rollZ ?? 0],
     scale: [0.2, 0.2, 0.15],
   };
 }
@@ -208,19 +241,14 @@ function Model({
   const groupRef = useRef<THREE.Group>(null!);
   const draggingRef = useRef(false);
 
-  // Identify the body mesh + raycast-derived placement anchors. Rather than
-  // using the bbox alone (which includes sleeves and would put chest center
-  // X at half the sleeve-to-sleeve span), we cast rays from outside the
-  // mesh toward each placement zone and use the actual surface hit points.
-  // This guarantees:
-  //   1. positions are on the real garment surface (no in-air decals)
-  //   2. left/right sleeve positions land on the sleeve, not the chest
-  //   3. front positions don't bleed through to the back
-  // The Decal then auto-orients to the closest vertex normal at that hit.
-  const { bodyMeshName, bodyBounds, anchors } = useMemo(() => {
+  // Identify the body mesh + capture its bounding box. Pure bbox math is
+  // used to derive placement positions — no raycasting, because raycasts
+  // were missing for 3 of 4 placements on our authored GLBs (the rays
+  // went through the neck opening or glanced off the curved sleeve).
+  const { bodyMeshName, bodyBounds } = useMemo(() => {
     const entries = Object.entries(nodes) as Array<[string, any]>;
     const meshes = entries.filter(([, n]) => n?.isMesh && n.geometry);
-    if (meshes.length === 0) return { bodyMeshName: null, bodyBounds: null, anchors: null };
+    if (meshes.length === 0) return { bodyMeshName: null, bodyBounds: null };
     const score = (name: string, node: any) => {
       const lc = name.toLowerCase();
       let s = node.geometry?.attributes?.position?.count ?? 0;
@@ -238,94 +266,9 @@ function Model({
     const bestNode = best[1];
     bestNode.geometry.computeBoundingBox?.();
     const box = bestNode.geometry.boundingBox as THREE.Box3 | null;
-    if (!box) return { bodyMeshName: best[0], bodyBounds: null, anchors: null };
+    if (!box) return { bodyMeshName: best[0], bodyBounds: null };
     const bounds: BodyBounds = { min: box.min.clone(), max: box.max.clone() };
-
-    // Build a one-shot Mesh for raycasting against the geometry. We don't
-    // need this mesh in the scene — just for the Raycaster API.
-    const probeMesh = new THREE.Mesh(bestNode.geometry, new THREE.MeshBasicMaterial());
-    const raycaster = new THREE.Raycaster();
-
-    const sizeX = box.max.x - box.min.x;
-    const sizeY = box.max.y - box.min.y;
-    const sizeZ = box.max.z - box.min.z;
-    const cx = (box.min.x + box.max.x) / 2;
-    const cy = (box.min.y + box.max.y) / 2;
-    const farOut = Math.max(sizeX, sizeY, sizeZ) * 3;
-
-    // Cast a ray from `origin` in `direction`, return the first hit's
-    // point + normal (or null if it missed).
-    const probe = (origin: THREE.Vector3, direction: THREE.Vector3) => {
-      raycaster.set(origin, direction.normalize());
-      const hits = raycaster.intersectObject(probeMesh, false);
-      if (hits.length === 0) return null;
-      const h = hits[0];
-      return {
-        point: h.point.clone(),
-        normal: h.face?.normal.clone() ?? new THREE.Vector3(0, 0, 1),
-      };
-    };
-
-    // Each placement gets a (origin, direction) so we shoot from outside
-    // the model inward to the surface. The Y for chest is ~70% up the body,
-    // sleeves are at ~78% (just below the shoulder line), back is at ~62%.
-    type Anchor = { position: [number, number, number]; rollZ: number; widthFrac: number };
-    const buildAnchor = (origin: THREE.Vector3, dir: THREE.Vector3, widthFrac: number, rollZ = 0): Anchor | null => {
-      const hit = probe(origin, dir);
-      if (!hit) return null;
-      // Push the position slightly *past* the surface in the direction of
-      // the normal so the Decal cube center sits just outside the fabric.
-      // DecalGeometry projects inward from there, capturing the surface
-      // triangles cleanly without bleeding to the back.
-      const pushOut = sizeZ * 0.02;
-      const pos = hit.point.clone().add(hit.normal.clone().multiplyScalar(pushOut));
-      return {
-        position: [pos.x, pos.y, pos.z],
-        rollZ,
-        widthFrac,
-      };
-    };
-
-    // Y placement notes (in normalised-from-bottom space, then converted):
-    //   1.0 = top of bbox (collar / hood top)
-    //   0.85 = neck opening — DO NOT aim rays here, no fabric
-    //   0.70 = chest line — sweet spot for front/back design
-    //   0.55 = mid-torso
-    //   0.30 = waist
-    //   0.0 = hem
-    // We use 0.66 for chest (front + back) to clear the neckline reliably
-    // even on hooded garments where the bbox top is higher (the hood).
-    const yChest = box.min.y + sizeY * 0.66;
-    // Sleeves: bias slightly LOWER than the shoulder line so the X-axis
-    // ray clears the deltoid mass and hits the upper-arm sleeve cleanly.
-    const ySleeve = box.min.y + sizeY * 0.72;
-    const anchors = {
-      front_chest:  buildAnchor(
-        new THREE.Vector3(cx,                 yChest, box.max.z + farOut),
-        new THREE.Vector3(0, 0, -1),
-        0.42,
-      ),
-      back:         buildAnchor(
-        new THREE.Vector3(cx,                 yChest, box.min.z - farOut),
-        new THREE.Vector3(0, 0, 1),
-        0.5,
-      ),
-      left_sleeve:  buildAnchor(
-        new THREE.Vector3(box.max.x + farOut, ySleeve, 0),
-        new THREE.Vector3(-1, 0, 0),
-        0.16,
-      ),
-      right_sleeve: buildAnchor(
-        new THREE.Vector3(box.min.x - farOut, ySleeve, 0),
-        new THREE.Vector3(1, 0, 0),
-        0.16,
-      ),
-    };
-
-    // Clean up the probe material so we don't leak.
-    probeMesh.material.dispose();
-
-    return { bodyMeshName: best[0], bodyBounds: bounds, anchors };
+    return { bodyMeshName: best[0], bodyBounds: bounds };
   }, [nodes]);
 
   // Update color. Body and trim are repainted independently so users can have
@@ -470,15 +413,19 @@ function Model({
               // Resolve transform from the body bbox so coords work across
               // all of our authored GLBs (each has a different absolute
               // coordinate range). User overrides win where present.
-              const preset = resolvePlacement(layer.placementId, bodyBounds, anchors);
+              const preset = resolvePlacement(layer.placementId, bodyBounds);
               if (!preset) return null;
               const isActive = layer.placementId === activePlacement;
               const finalPos = (isActive && customDecal?.position) ?? layer.customPosition ?? preset.position;
-              // Rotation: user-applied roll wins; falls back to preset's roll.
-              // Drei's Decal auto-orients to the surface when rotation is a
-              // number, then applies this as Z-roll, so this single scalar
-              // gives both "lays flat" + "user twist" behaviour.
-              const finalRot: number = layer.customRotation ?? preset.rotation;
+              // Rotation: preset gives the cube's base orientation (so it
+              // faces the right way out of the garment). User's customRotation
+              // is in-plane Z-roll layered on top of that base orientation.
+              const userRoll = layer.customRotation ?? 0;
+              const finalRot: [number, number, number] = [
+                preset.rotation[0],
+                preset.rotation[1],
+                preset.rotation[2] + userRoll,
+              ];
               // User-applied scale slider value (single number) replaces the
               // visible width/height but keeps the preset's projection depth
               // so the back-bleed protection isn't lost when resizing.
@@ -507,7 +454,7 @@ function Model({
             {/* When there's no layer for the active placement, render a faded
                 placeholder so the user knows where the design will land. */}
             {isBody && activePlacement && !layers.some(l => l.placementId === activePlacement) && (() => {
-              const preset = resolvePlacement(activePlacement, bodyBounds, anchors);
+              const preset = resolvePlacement(activePlacement, bodyBounds);
               if (!preset) return null;
               return (
                 <Decal
