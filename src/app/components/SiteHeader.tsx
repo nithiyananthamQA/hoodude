@@ -190,7 +190,15 @@ export default function SiteHeader({ onOpenCart }: SiteHeaderProps) {
                 ref={inputRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search catalog specimens…"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && query.trim()) {
+                    const q = query.trim();
+                    setSearchOpen(false);
+                    setQuery("");
+                    navigate(`/shop?q=${encodeURIComponent(q)}`);
+                  }
+                }}
+                placeholder="Search catalog specimens… (press Enter for all results)"
                 className="flex-1 text-[18px] bg-transparent outline-none font-medium text-black"
               />
               <button
@@ -282,7 +290,24 @@ export default function SiteHeader({ onOpenCart }: SiteHeaderProps) {
               )}
 
               {results.length > 0 && (
-                <div className="max-w-[720px] mx-auto grid grid-cols-2 md:grid-cols-3 gap-4">
+                <div className="max-w-[720px] mx-auto">
+                  <div className="flex items-center justify-between mb-4">
+                    <p className="text-[12px] text-black/50">
+                      {results.length} match{results.length === 1 ? "" : "es"}
+                    </p>
+                    <button
+                      onClick={() => {
+                        const q = query.trim();
+                        setSearchOpen(false);
+                        setQuery("");
+                        navigate(`/shop?q=${encodeURIComponent(q)}`);
+                      }}
+                      className="text-[12px] font-semibold underline underline-offset-4 hover:text-brand"
+                    >
+                      See all results in shop →
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                   {results.map((p) => (
                     <button
                       key={p.id}
@@ -305,6 +330,7 @@ export default function SiteHeader({ onOpenCart }: SiteHeaderProps) {
                       <p className="text-[12px] text-brand font-semibold">{formatPrice(p.price)}</p>
                     </button>
                   ))}
+                  </div>
                 </div>
               )}
             </div>

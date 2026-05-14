@@ -25,7 +25,9 @@ export type AnalyticsEvent =
   | "vr_open"
   | "tryon_open"
   | "design_prompt_submit"
-  | "design_generated";
+  | "design_generated"
+  | "customize_add_to_cart"
+  | "customize_save_draft";
 
 type EventProps = Record<string, string | number | boolean | null | undefined>;
 

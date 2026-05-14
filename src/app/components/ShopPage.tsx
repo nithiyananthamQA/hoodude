@@ -37,6 +37,7 @@ export default function ShopPage({ onOpenCart }: ShopPageProps) {
   const activeSize = searchParams.get("size") ?? "all";
   const inStockOnly = searchParams.get("stock") === "in";
   const sort = (searchParams.get("sort") as SortId) ?? "featured";
+  const searchQuery = searchParams.get("q")?.trim() ?? "";
   const availability = inStockOnly ? ["In stock"] : [];
 
   const updateParams = (next: Record<string, string | null>) => {
@@ -61,6 +62,16 @@ export default function ShopPage({ onOpenCart }: ShopPageProps) {
 
   const filtered = useMemo(() => {
     let base = [...products];
+
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      base = base.filter((p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.category.toLowerCase().includes(q) ||
+        p.neck.toLowerCase().includes(q) ||
+        p.fit.toLowerCase().includes(q)
+      );
+    }
 
     if (activeCategory !== "all") {
        base = base.filter(p => {
@@ -90,7 +101,7 @@ export default function ShopPage({ onOpenCart }: ShopPageProps) {
     else if (sort === "priceDesc") base.sort((a, b) => b.price - a.price);
     else if (sort === "newest") base.reverse();
     return base;
-  }, [activeCategory, activeSize, availability, sort]);
+  }, [activeCategory, activeSize, availability, sort, searchQuery]);
 
   const resetFilters = () => {
     setSearchParams({}, { replace: true });
@@ -146,13 +157,32 @@ export default function ShopPage({ onOpenCart }: ShopPageProps) {
             <span className="text-black font-medium">Shop</span>
           </div>
 
+          {searchQuery && (
+            <div className="mb-6 flex items-center gap-3 text-[13px]">
+              <span className="text-black/50">Search results for</span>
+              <span className="px-3 h-7 inline-flex items-center rounded-full bg-black text-white font-medium">
+                "{searchQuery}"
+              </span>
+              <button
+                onClick={() => updateParams({ q: null })}
+                className="text-black/50 hover:text-black underline underline-offset-4"
+              >
+                Clear search
+              </button>
+            </div>
+          )}
+
           <div className="flex items-end justify-between gap-6">
             <div>
               <h1
                 className="text-[48px] md:text-[64px] text-ink tracking-[-2px] leading-[1] capitalize"
                 style={{ fontWeight: 600 }}
               >
-                {activeCategory === "all" ? "Our Collection" : activeCategory}
+                {searchQuery
+                  ? `Results for "${searchQuery}"`
+                  : activeCategory === "all"
+                    ? "Our Collection"
+                    : activeCategory}
               </h1>
               <p className="text-[14px] text-black/40 mt-4 tracking-tight">
                 Displaying {filtered.length} curated pieces available for order.

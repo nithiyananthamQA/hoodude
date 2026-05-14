@@ -1,10 +1,14 @@
 import { ArrowLeft, Sparkles, Upload, Image as ImageIcon, Type, Layers, ChevronRight, ShoppingBag, Minus, Plus, RotateCw, Box, Glasses, User, X } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router";
-import { Suspense, useMemo, useRef, useState, Component, ReactNode } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState, Component, ReactNode, lazy } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { findProduct, products } from "./products";
 import type { SizeCode } from "./products";
-import Product3DViewer, { DEFAULT_MODEL_PATH, type Product3DViewerHandle } from "./Product3DViewer";
+import type { Product3DViewerHandle } from "./Product3DViewer";
+const Product3DViewer = lazy(() => import("./Product3DViewer"));
+// Inlined so we don't pull the 3D module into this page's static graph. The
+// canonical value still lives in Product3DViewer.tsx; keep them in sync.
+const DEFAULT_MODEL_PATH = "/3d/white-tshirt.glb";
 import PageHead from "./PageHead";
 import NotFoundPage from "./NotFoundPage";
 import PromptBar from "./customize/PromptBar";
@@ -13,6 +17,8 @@ import VRModal from "./product/VRModal";
 import TryOnModal from "./product/TryOnModal";
 import { generateDesign, isDesignGenConfigured, pollinationsUrl } from "../utils/generateDesign";
 import { track } from "../utils/analytics";
+import { useCart } from "../store/CartContext";
+import { toast } from "sonner";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -73,6 +79,7 @@ function CustomizePageInner({
   onOpenCart: () => void;
 }) {
   const navigate = useNavigate();
+  const { add: addToCart } = useCart();
 
   const [activeTool, setActiveTool] = useState<ToolId>("ai");
   const [selectedColor, setSelectedColor] = useState(product.colors[0].name);
@@ -227,6 +234,94 @@ function CustomizePageInner({
 
   const activeColor = product.colors.find((c) => c.name === selectedColor) ?? product.colors[0];
   const totalPrice = product.price * quantity;
+
+  const DRAFT_KEY = `hoodude.customize.draft.${product.id}`;
+
+  // Restore a saved draft once, on first mount for this product.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(DRAFT_KEY);
+      if (!raw) return;
+      const draft = JSON.parse(raw) as {
+        color?: string;
+        size?: string;
+        quantity?: number;
+        placement?: string;
+        designUrl?: string | null;
+      };
+      if (draft.color && product.colors.some((c) => c.name === draft.color)) {
+        setSelectedColor(draft.color);
+      }
+      if (draft.size && product.sizes.includes(draft.size as SizeCode)) {
+        setSelectedSize(draft.size as SizeCode);
+      }
+      if (typeof draft.quantity === "number" && draft.quantity > 0) {
+        setQuantity(draft.quantity);
+      }
+      if (draft.placement && placements.some((p) => p.id === draft.placement)) {
+        setActivePlacement(draft.placement);
+      }
+      if (draft.designUrl) setDesignUrl(draft.designUrl);
+      toast("Draft restored", {
+        description: "We brought back your last customization for this product.",
+      });
+    } catch {
+      /* corrupt draft — ignore */
+    }
+    // Intentionally only on mount per product.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product.id]);
+
+  const handleAddToCart = () => {
+    addToCart({
+      // Each customized variant is its own cart line — include placement and
+      // a hash of the design so users can stack multiple designs of the same
+      // product/color/size without them collapsing into one line.
+      id: designUrl
+        ? `${product.id}::${activeColor.name}::${selectedSize}::${activePlacement}::custom-${Date.now()}`
+        : undefined,
+      productId: product.id,
+      name: designUrl ? `${product.name} · Custom` : product.name,
+      image: designUrl ?? product.image,
+      color: activeColor.name,
+      colorHex: activeColor.hex,
+      size: selectedSize,
+      price: product.price,
+      quantity,
+      maxStock: product.stock === "Make to Order" ? 200 : 50,
+    });
+    track("customize_add_to_cart", {
+      product_id: product.id,
+      placement: activePlacement,
+      has_design: Boolean(designUrl),
+      quantity,
+    });
+    toast.success("Added to bag", {
+      description: `${product.name} · ${activeColor.name} · ${selectedSize} · ×${quantity}`,
+    });
+    onOpenCart();
+  };
+
+  const handleSaveDraft = () => {
+    try {
+      const draft = {
+        productId: product.id,
+        color: activeColor.name,
+        size: selectedSize,
+        quantity,
+        placement: activePlacement,
+        designUrl,
+        savedAt: new Date().toISOString(),
+      };
+      window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+      track("customize_save_draft", { product_id: product.id });
+      toast.success("Draft saved", {
+        description: "Pick up where you left off next time you open this product.",
+      });
+    } catch {
+      toast.error("Couldn't save draft", { description: "Storage is full or blocked." });
+    }
+  };
 
   const handlePromptSubmit = async (prompt: string) => {
     if (designBusy) return;
@@ -415,11 +510,14 @@ function CustomizePageInner({
           </div>
 
           <div className="flex items-center gap-2">
-            <button className="text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors">
+            <button
+              onClick={handleSaveDraft}
+              className="text-meta font-medium text-fg-mute hover:text-fg px-3 h-9 rounded-full transition-colors"
+            >
               Save Draft
             </button>
             <button
-              onClick={onOpenCart}
+              onClick={handleAddToCart}
               className="flex items-center gap-2 px-5 h-9 bg-fg text-white rounded-full text-meta font-semibold hover:bg-brand transition-colors btn-press"
             >
               <ShoppingBag size={14} strokeWidth={1.8} />
