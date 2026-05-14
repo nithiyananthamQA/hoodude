@@ -98,10 +98,11 @@ function resolvePlacement(
   if (!id || !bounds) return null;
   const sizeX = bounds.max.x - bounds.min.x;
   const sizeZ = bounds.max.z - bounds.min.z;
-  // Projection-cube depth — kept small so a front-facing decal doesn't
-  // bleed through to the back. ~40% of the bbox depth is generous enough
-  // for the fabric thickness without crossing to the other side.
-  const depth = sizeZ * 0.4;
+  // Projection-cube depth — needs to be large enough that the decal isn't
+  // clipped on the curved fabric (back area complaint), but small enough
+  // not to bleed through to the opposite side. ~55% of the bbox depth
+  // gives a clean capture on a curved torso without crossing to the back.
+  const depth = sizeZ * 0.55;
 
   // Try the raycast anchor first. This is the path that should hit on all
   // four placements for our authored garments.
@@ -285,26 +286,37 @@ function Model({
       };
     };
 
+    // Y placement notes (in normalised-from-bottom space, then converted):
+    //   1.0 = top of bbox (collar / hood top)
+    //   0.85 = neck opening — DO NOT aim rays here, no fabric
+    //   0.70 = chest line — sweet spot for front/back design
+    //   0.55 = mid-torso
+    //   0.30 = waist
+    //   0.0 = hem
+    // We use 0.66 for chest (front + back) to clear the neckline reliably
+    // even on hooded garments where the bbox top is higher (the hood).
+    const yChest = box.min.y + sizeY * 0.66;
+    // Sleeves: bias slightly LOWER than the shoulder line so the X-axis
+    // ray clears the deltoid mass and hits the upper-arm sleeve cleanly.
+    const ySleeve = box.min.y + sizeY * 0.72;
     const anchors = {
       front_chest:  buildAnchor(
-        new THREE.Vector3(cx,                 cy + sizeY * 0.18, box.max.z + farOut),
+        new THREE.Vector3(cx,                 yChest, box.max.z + farOut),
         new THREE.Vector3(0, 0, -1),
         0.42,
       ),
       back:         buildAnchor(
-        new THREE.Vector3(cx,                 cy + sizeY * 0.10, box.min.z - farOut),
+        new THREE.Vector3(cx,                 yChest, box.min.z - farOut),
         new THREE.Vector3(0, 0, 1),
         0.5,
       ),
-      // Sleeves: shoot from far out on the X axis inward. We pick a Y
-      // *near the top* of the bbox (shoulder area) and aim straight in.
       left_sleeve:  buildAnchor(
-        new THREE.Vector3(box.max.x + farOut, cy + sizeY * 0.25, 0),
+        new THREE.Vector3(box.max.x + farOut, ySleeve, 0),
         new THREE.Vector3(-1, 0, 0),
         0.16,
       ),
       right_sleeve: buildAnchor(
-        new THREE.Vector3(box.min.x - farOut, cy + sizeY * 0.25, 0),
+        new THREE.Vector3(box.min.x - farOut, ySleeve, 0),
         new THREE.Vector3(1, 0, 0),
         0.16,
       ),
