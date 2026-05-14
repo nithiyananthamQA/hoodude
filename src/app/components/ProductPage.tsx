@@ -242,8 +242,12 @@ function ProductDetail({ product, onOpenCart }: { product: Product; onOpenCart: 
 
         <ProductSpecs />
         <ProductTabs />
-        <RecentlyViewedRail excludeId={product.id} />
+        {/* "You may also like" comes FIRST — a new visitor hasn't viewed
+            anything yet, so the priority is showing items related to the
+            current product. Recently-viewed is a smaller, footer-style
+            history rail at the bottom, visually distinct from this section. */}
         <RelatedRail items={similarProducts} />
+        <RecentlyViewedRail excludeId={product.id} />
       </div>
 
       <SiteFooter />

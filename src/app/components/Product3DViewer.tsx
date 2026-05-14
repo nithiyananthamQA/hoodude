@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useRef, useMemo, useState, useCallback, forwardRef, useImperativeHandle } from "react";
-import { Canvas, useFrame, type ThreeEvent } from "@react-three/fiber";
+import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { OrbitControls, useGLTF, Center, Html, useProgress, Decal, Environment, ContactShadows } from "@react-three/drei";
 import * as THREE from "three";
 import { Minus, Plus, Maximize2, Sparkles, Move } from "lucide-react";
@@ -13,14 +13,43 @@ interface DecalTransform {
   scale: number;
 }
 
+// Four placement zones. Back is the known-good baseline; the others mirror
+// its exact projection mechanism (cube positioned just past the target
+// surface, rotated so the projector's local +Z axis points INTO the body
+// — the direction the design needs to be projected onto the fabric).
 function getPlacementProps(id?: string): DecalTransform | null {
   switch (id) {
-    case "chest_left":       return { position: [0.11, 0.07, 0.15], rotation: [0, 0, 0], scale: 0.14 };
-    case "chest_center":     return { position: [0, 0.09, 0.15], rotation: [0, 0, 0], scale: 0.18 };
-    case "large_center":     return { position: [0, -0.05, 0.15], rotation: [0, 0, 0], scale: 0.35 };
-    case "back":             return { position: [0, 0, -0.165], rotation: [0, Math.PI, 0], scale: 0.38 };
-    case "sleeve_left_top":  return { position: [0.24, 0.08, 0.05], rotation: [0, Math.PI / 2.5, 0], scale: 0.12 };
-    case "sleeve_right_top": return { position: [-0.24, 0.08, 0.05], rotation: [0, -Math.PI / 2.5, 0], scale: 0.12 };
+    // BACK (working baseline)
+    // Position Z = -0.165 (just past the back surface), Y-rotated π so the
+    // projector cube faces -Z (into the body, capturing back-facing tris).
+    case "back":
+      return { position: [0, 0.02, -0.165], rotation: [0, Math.PI, 0], scale: 0.34 };
+
+    // FRONT CHEST — projects onto the upper-front torso. Z = +0.165 (just
+    // past the front surface), identity rotation so the cube's +Z axis
+    // matches the front-facing direction. Y raised slightly above center
+    // (0.05) so the design sits on the chest rather than the belly.
+    // Scale 0.28 keeps it well inside the chest area, not bleeding into
+    // the neckline or armpits.
+    case "front_chest":
+      return { position: [0, 0.05, 0.165], rotation: [0, 0, 0], scale: 0.28 };
+
+    // LEFT HAND (sleeve) — uses Back's mechanism mirrored to the X axis.
+    // Position X = +0.30 (just past the sleeve cuff outer edge),
+    // rotation -π/2 around Y so the cube's +Z axis points -X (into the
+    // body), scale 0.20 makes the cube span 20cm in each dimension —
+    // big enough to wrap around the sleeve tube's outer face without
+    // bleeding through to the body or the opposite-side sleeve.
+    //
+    // Y matches Back's Y (~0.04) since both front/back work with their
+    // Y values near 0; the same coordinate frame applies to sleeves.
+    case "left_sleeve":
+      return { position: [0.30, 0.04, 0.02], rotation: [0, -Math.PI / 2, 0], scale: 0.20 };
+
+    // RIGHT HAND (sleeve) — mirror across X.
+    case "right_sleeve":
+      return { position: [-0.30, 0.04, 0.02], rotation: [0, Math.PI / 2, 0], scale: 0.20 };
+
     default: return null;
   }
 }
@@ -40,6 +69,10 @@ interface ModelProps {
   enableDrag: boolean;
   /** Notifies parent so OrbitControls can be paused while dragging. */
   onDragChange: (dragging: boolean) => void;
+  /** Multiplier on the placement preset's scale. 1.0 = preset default. */
+  designScaleMul?: number;
+  /** In-plane rotation around the surface normal (radians of Z-roll). */
+  designRollZ?: number;
 }
 
 function Model({
@@ -51,10 +84,25 @@ function Model({
   onCustomDecalChange,
   enableDrag,
   onDragChange,
+  designScaleMul = 1,
+  designRollZ = 0,
 }: ModelProps) {
   const { nodes, scene } = useGLTF(modelPath) as any;
   const groupRef = useRef<THREE.Group>(null!);
   const draggingRef = useRef(false);
+  const invalidate = useThree((state) => state.invalidate);
+
+  // Force a render frame whenever the texture *identity* changes (e.g.
+  // upload finishes loading and a new THREE.Texture lands on the decal).
+  // Without this, on-demand frameloop setups can fail to paint the new
+  // texture until the user interacts (orbit/scroll) — which is the
+  // "upload only shows after I click" symptom.
+  useEffect(() => {
+    if (uploadTexture) {
+      uploadTexture.needsUpdate = true;
+      invalidate();
+    }
+  }, [uploadTexture, invalidate]);
 
   // Update color
   useEffect(() => {
@@ -77,17 +125,32 @@ function Model({
     };
   }, [enableDrag]);
 
-  // Decal sourcing — custom drag position wins over placement preset, but the
-  // scale stays whatever the active placement defines so the design doesn't
-  // unexpectedly resize when dragged.
+  // Decal sourcing. Three layered overrides on top of the placement preset:
+  //   1. customDecal (user drag) overrides position + rotation
+  //   2. designScaleMul (user size slider) scales the decal width/height
+  //   3. designRollZ (user rotation slider) adds Z-roll to the cube rotation
+  // Each is optional; with no overrides we get exactly the preset.
   const placementProps = getPlacementProps(activePlacement);
-  const decalProps: DecalTransform | null = customDecal
-    ? {
-        position: customDecal.position,
-        rotation: customDecal.rotation,
-        scale: placementProps?.scale ?? 0.22,
-      }
-    : placementProps;
+  const baseScale = placementProps?.scale ?? 0.22;
+  const decalProps: DecalTransform | null = (() => {
+    if (!placementProps && !customDecal) return null;
+    const base = customDecal
+      ? {
+          position: customDecal.position,
+          rotation: customDecal.rotation as [number, number, number],
+          scale: baseScale,
+        }
+      : (placementProps as DecalTransform);
+    return {
+      position: base.position,
+      rotation: [
+        base.rotation[0],
+        base.rotation[1],
+        base.rotation[2] + designRollZ,
+      ] as [number, number, number],
+      scale: base.scale * designScaleMul,
+    };
+  })();
 
   // Convert a raycast hit to a (localPosition, localRotation) tuple. The
   // rotation aligns the decal's local Z with the surface normal at the hit
@@ -108,10 +171,16 @@ function Model({
     };
   };
 
-  const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
-    if (!enableDrag) return;
-    e.stopPropagation();
-    (e.target as HTMLElement)?.setPointerCapture?.(e.pointerId);
+  // Drag is initiated by a SLIGHT HOLD on the body (not an immediate-down).
+  // This lets the user freely orbit/rotate the model on a quick click+drag
+  // while still allowing a deliberate hold to enter design-positioning mode.
+  // Without this, every click on the body was hijacked into design-drag and
+  // the user couldn't rotate the model after uploading.
+  const DRAG_HOLD_MS = 180;
+  const pointerDownAtRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const dragHoldTimerRef = useRef<number | null>(null);
+
+  const startDecalDrag = (e: ThreeEvent<PointerEvent>) => {
     draggingRef.current = true;
     onDragChange(true);
     document.body.style.cursor = "grabbing";
@@ -119,20 +188,89 @@ function Model({
     if (t) onCustomDecalChange(t);
   };
 
+  const handlePointerDown = (e: ThreeEvent<PointerEvent>) => {
+    if (!enableDrag) return;
+    // DON'T stopPropagation — let OrbitControls also receive the down so
+    // it can register the start of an orbit gesture. We'll decide which
+    // gesture wins (orbit vs design-drag) based on movement vs hold time.
+    pointerDownAtRef.current = { x: e.clientX, y: e.clientY, time: performance.now() };
+    // Start a hold-timer; if user holds still for DRAG_HOLD_MS, we enter
+    // design-drag mode. If they move enough first, we cancel and stay in
+    // orbit mode.
+    dragHoldTimerRef.current = window.setTimeout(() => {
+      // Only enter drag if the user hasn't already moved significantly
+      // (handlePointerMove cancels the timer on real movement).
+      startDecalDrag(e);
+    }, DRAG_HOLD_MS);
+  };
+
   const handlePointerMove = (e: ThreeEvent<PointerEvent>) => {
-    if (!draggingRef.current) return;
-    e.stopPropagation();
-    const t = transformFromHit(e);
-    if (t) onCustomDecalChange(t);
+    if (draggingRef.current) {
+      e.stopPropagation();
+      const t = transformFromHit(e);
+      if (t) onCustomDecalChange(t);
+      return;
+    }
+    // If pointer moves more than a small threshold during the hold window,
+    // cancel the hold-timer: this becomes an orbit gesture, not a drag.
+    if (pointerDownAtRef.current && dragHoldTimerRef.current != null) {
+      const dx = e.clientX - pointerDownAtRef.current.x;
+      const dy = e.clientY - pointerDownAtRef.current.y;
+      if (Math.hypot(dx, dy) > 4) {
+        window.clearTimeout(dragHoldTimerRef.current);
+        dragHoldTimerRef.current = null;
+        pointerDownAtRef.current = null;
+      }
+    }
   };
 
   const endDrag = (e: ThreeEvent<PointerEvent>) => {
+    // Cancel any pending hold timer (orbit gesture finished without
+    // triggering design-drag).
+    if (dragHoldTimerRef.current != null) {
+      window.clearTimeout(dragHoldTimerRef.current);
+      dragHoldTimerRef.current = null;
+    }
+    pointerDownAtRef.current = null;
     if (!draggingRef.current) return;
     draggingRef.current = false;
     onDragChange(false);
     (e.target as HTMLElement)?.releasePointerCapture?.(e.pointerId);
     document.body.style.cursor = enableDrag ? "grab" : "auto";
   };
+
+  // Listen for pointerup ANYWHERE in the window — guards against the user
+  // releasing the mouse off the canvas (which doesn't fire mesh pointerup).
+  useEffect(() => {
+    const onWindowUp = () => {
+      if (dragHoldTimerRef.current != null) {
+        window.clearTimeout(dragHoldTimerRef.current);
+        dragHoldTimerRef.current = null;
+      }
+      pointerDownAtRef.current = null;
+      if (draggingRef.current) {
+        draggingRef.current = false;
+        onDragChange(false);
+        document.body.style.cursor = enableDrag ? "grab" : "auto";
+      }
+    };
+    // Also let Escape cancel an in-progress drag.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && draggingRef.current) {
+        draggingRef.current = false;
+        onDragChange(false);
+        document.body.style.cursor = enableDrag ? "grab" : "auto";
+      }
+    };
+    window.addEventListener("pointerup", onWindowUp);
+    window.addEventListener("pointercancel", onWindowUp);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerup", onWindowUp);
+      window.removeEventListener("pointercancel", onWindowUp);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [enableDrag, onDragChange]);
 
   const handlePointerOver = () => {
     if (enableDrag && !draggingRef.current) document.body.style.cursor = "grab";
@@ -141,18 +279,78 @@ function Model({
     if (!draggingRef.current) document.body.style.cursor = "auto";
   };
 
+  // Identify EVERY body mesh, not just one. Authored GLBs from CLO3D /
+  // Marvelous Designer split the garment into many sub-primitives — the
+  // white-tshirt's `Cloth_mesh` has 23 primitives. drei's <Decal> projects
+  // only onto its direct parent mesh, so attaching the decal to a single
+  // "the body mesh" only hits one primitive (typically the back), which is
+  // exactly the "Back works but Front doesn't" bug.
+  //
+  // The fix: classify every mesh as "is this body fabric or trim?" and
+  // attach the decal as a child of EVERY body primitive. DecalGeometry's
+  // cube clipping then handles which primitive's triangles actually get
+  // textured (only the ones inside the cube volume).
+  const bodyMeshNames = useMemo(() => {
+    const entries = Object.entries(nodes) as Array<[string, any]>;
+    const meshes = entries.filter(([, n]) => n?.isMesh && n.geometry);
+
+    // DIAGNOSTIC: ?debug=1 logs the full mesh inventory.
+    if (typeof window !== "undefined" &&
+        new URLSearchParams(window.location.search).get("debug") === "1") {
+      // eslint-disable-next-line no-console
+      console.log("[3D mesh inventory]", meshes.map(([n, node]) => {
+        node.geometry?.computeBoundingBox?.();
+        const b = node.geometry?.boundingBox;
+        return {
+          name: n,
+          verts: node.geometry?.attributes?.position?.count,
+          bboxMin: b ? [+b.min.x.toFixed(3), +b.min.y.toFixed(3), +b.min.z.toFixed(3)] : null,
+          bboxMax: b ? [+b.max.x.toFixed(3), +b.max.y.toFixed(3), +b.max.z.toFixed(3)] : null,
+        };
+      }));
+    }
+
+    if (meshes.length === 0) return new Set<string>();
+
+    // Anything whose name marks it as a non-body part is excluded. Everything
+    // else with a reasonable vertex count is treated as body fabric.
+    const isTrim = (name: string) => {
+      const lc = name.toLowerCase();
+      return lc.includes("trim") || lc.includes("seam") || lc.includes("zipper") ||
+             lc.includes("button") || lc.includes("label") || lc.includes("tag") ||
+             lc.includes("hardware") || lc.includes("zip_");
+    };
+
+    const bodyNames = new Set<string>();
+    for (const [name, node] of meshes) {
+      const verts = node.geometry?.attributes?.position?.count ?? 0;
+      // Exclude tiny meshes (mostly hardware/buttons) and named trim pieces.
+      if (verts < 500) continue;
+      if (isTrim(name)) continue;
+      bodyNames.add(name);
+    }
+
+    // Fallback: if nothing qualified, just take the largest mesh so the decal
+    // has SOMEWHERE to project (better than nothing).
+    if (bodyNames.size === 0) {
+      let best = meshes[0];
+      let bestVerts = meshes[0][1].geometry?.attributes?.position?.count ?? 0;
+      for (let i = 1; i < meshes.length; i++) {
+        const v = meshes[i][1].geometry?.attributes?.position?.count ?? 0;
+        if (v > bestVerts) { best = meshes[i]; bestVerts = v; }
+      }
+      bodyNames.add(best[0]);
+    }
+
+    return bodyNames;
+  }, [nodes]);
+
   return (
     <group ref={groupRef}>
       {Object.entries(nodes).map(([name, node]: [string, any]) => {
         if (!node.isMesh) return null;
 
-        // Very permissive body detection
-        const isBody = name.toLowerCase().includes('shirt') ||
-                       name.toLowerCase().includes('body') ||
-                       name.toLowerCase().includes('fabric') ||
-                       name.includes('Object_4') ||
-                       name.includes('Mesh') ||
-                       name.toLowerCase().includes('garment');
+        const isBody = bodyMeshNames.has(name);
 
         return (
           <mesh
@@ -202,10 +400,10 @@ function placementCameraPosition(
   placement: string | undefined,
   cinematic: boolean,
 ): THREE.Vector3 {
-  if (placement === "back") return new THREE.Vector3(0, 0, cinematic ? -2.6 : -2.4);
-  if (placement?.includes("sleeve_left")) return new THREE.Vector3(1.8, 0.3, 1.2);
-  if (placement?.includes("sleeve_right")) return new THREE.Vector3(-1.8, 0.3, 1.2);
-  return new THREE.Vector3(0, cinematic ? 0.1 : 0, cinematic ? 2.6 : 2.4);
+  if (placement === "back") return new THREE.Vector3(0, 0, cinematic ? -3.0 : -2.9);
+  if (placement === "left_sleeve") return new THREE.Vector3(2.2, 0.3, 1.4);
+  if (placement === "right_sleeve") return new THREE.Vector3(-2.2, 0.3, 1.4);
+  return new THREE.Vector3(0, cinematic ? 0.1 : 0, cinematic ? 3.0 : 2.9);
 }
 
 function CameraRig({
@@ -262,6 +460,10 @@ interface Product3DViewerProps {
    * bar to apply a generated design onto the active placement.
    */
   designImageUrl?: string | null;
+  /** Multiplier on the placement preset's base decal scale. 1.0 = default. */
+  designScaleMul?: number;
+  /** In-plane Z-roll of the decal (radians). */
+  designRollZ?: number;
 }
 
 /** Imperative API exposed via ref. Lets the parent grab a PNG snapshot of the
@@ -292,6 +494,8 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
   zoom,
   resetSignal,
   designImageUrl,
+  designScaleMul,
+  designRollZ,
 }, ref) {
   // Wrapper ref — used to find the underlying canvas DOM for snapshots.
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -397,10 +601,10 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
     controls.enabled = !isDraggingDecal;
   }, [isDraggingDecal]);
 
-  const DEFAULT_DISTANCE = cinematic ? 2.6 : 2.4;
-  const DETAIL_DISTANCE = 0.8; // close enough to read fabric weave
-  const MIN_DISTANCE = 0.5;
-  const MAX_DISTANCE = cinematic ? 4 : 3.2;
+  const DEFAULT_DISTANCE = cinematic ? 3.0 : 2.9;
+  const DETAIL_DISTANCE = 1.0; // close enough to read fabric weave
+  const MIN_DISTANCE = 0.6;
+  const MAX_DISTANCE = cinematic ? 4.5 : 3.8;
 
   const animateToDistance = useCallback((targetDistance: number) => {
     const camera = controlsRef.current?.object;
@@ -488,9 +692,14 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
   return (
     <div ref={wrapperRef} className={`w-full h-full relative group ${bgClass}`}>
       <Canvas
-        camera={{ position: [0, cinematic ? 0.1 : 0, cinematic ? 2.6 : 2.4], fov: cinematic ? 32 : 38 }}
+        camera={{ position: [0, cinematic ? 0.1 : 0, cinematic ? 3.0 : 2.9], fov: cinematic ? 32 : 38 }}
         shadows
         dpr={[1, 2]}
+        // Always-running render loop so texture-load state updates (which
+        // happen outside R3F's tick) repaint immediately. Without this the
+        // upload-design wouldn't appear until the user interacted with the
+        // canvas, triggering a manual frame.
+        frameloop="always"
         // preserveDrawingBuffer lets the parent grab the canvas as a PNG via
         // toDataURL — required for the Try-On snapshot bridge. Slight memory
         // cost; negligible for one viewer at a time.
@@ -514,6 +723,8 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
               }}
               enableDrag={!!designImageUrl}
               onDragChange={setIsDraggingDecal}
+              designScaleMul={designScaleMul}
+              designRollZ={designRollZ}
             />
           </Center>
           <CameraRig activePlacement={activePlacement} cinematic={cinematic} />

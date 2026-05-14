@@ -1,6 +1,5 @@
-import { useRef } from "react";
 import { useNavigate } from "react-router";
-import { motion, useScroll, useTransform } from "motion/react";
+import { motion } from "motion/react";
 import type { Product } from "../products";
 import { formatPrice } from "../../utils/currency";
 import Image from "../ui/Image";
@@ -10,37 +9,39 @@ interface Props {
   items: Product[];
 }
 
+/**
+ * "You may also like" — the PRIMARY recommendation rail on the product page.
+ * Big heading, prominent card layout. Distinct from the secondary
+ * RecentlyViewedRail (which uses smaller cards + a quiet eyebrow heading).
+ */
 export default function RelatedRail({ items }: Props) {
   const navigate = useNavigate();
-  const ref = useRef<HTMLElement>(null);
-  const { scrollYProgress } = useScroll({
-    target: ref,
-    offset: ["start end", "end start"],
-  });
-  // Heading drifts up as the rail enters view, then continues past so the
-  // section feels alive even when it's mostly off-screen.
-  const headingY = useTransform(scrollYProgress, [0, 1], [40, -40]);
+  if (items.length === 0) return null;
 
   return (
-    <section ref={ref} className="mt-16">
-      <motion.div
-        style={{ y: headingY }}
-        className="flex items-end justify-between mb-5"
-      >
-        <h3
-          className="text-[22px] text-black tracking-tight"
-          style={{ fontWeight: 600 }}
-        >
-          You may also like
-        </h3>
+    <section className="mt-20">
+      {/* Clear subtitle + primary heading so users instantly understand this
+          is "recommendations for what you're looking at right now". */}
+      <div className="flex items-end justify-between mb-6">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-black/45 mb-2">
+            Recommended for you
+          </p>
+          <h3
+            className="text-[24px] md:text-[28px] text-black tracking-tight"
+            style={{ fontWeight: 600 }}
+          >
+            You may also like
+          </h3>
+        </div>
         <button
           onClick={() => navigate("/shop")}
-          className="text-[11px] font-medium uppercase tracking-[0.15em] text-black/55 hover:text-black transition-colors"
+          className="text-[12px] font-medium uppercase tracking-[0.15em] text-black/55 hover:text-black transition-colors whitespace-nowrap"
         >
           View all →
         </button>
-      </motion.div>
-      <div className="grid grid-cols-5 gap-3 mb-10">
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-10">
         {items.map((p, i) => (
           <motion.div
             key={p.id}

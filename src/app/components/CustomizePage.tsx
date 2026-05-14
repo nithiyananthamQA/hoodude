@@ -82,7 +82,22 @@ function CustomizePageInner({
   const { add: addToCart } = useCart();
 
   const [activeTool, setActiveTool] = useState<ToolId>("ai");
-  const [selectedColor, setSelectedColor] = useState(product.colors[0].name);
+  // Pick the LIGHTEST available color as the initial selection so the user
+  // lands on a friendly, design-visible surface (a black tee swallows
+  // dark designs; a white/light tee shows them clearly). We compute
+  // perceptual brightness from the hex and choose the brightest swatch.
+  const [selectedColor, setSelectedColor] = useState(() => {
+    const brightness = (hex: string) => {
+      const h = hex.replace("#", "");
+      const r = parseInt(h.slice(0, 2), 16);
+      const g = parseInt(h.slice(2, 4), 16);
+      const b = parseInt(h.slice(4, 6), 16);
+      // Standard luminance formula
+      return 0.299 * r + 0.587 * g + 0.114 * b;
+    };
+    const sorted = [...product.colors].sort((a, b) => brightness(b.hex) - brightness(a.hex));
+    return sorted[0]?.name ?? product.colors[0].name;
+  });
   const [selectedSize, setSelectedSize] = useState(product.sizes[0]);
   const [quantity, setQuantity] = useState(product.moq || 25);
   const [zoom, setZoom] = useState(100);
@@ -93,6 +108,15 @@ function CustomizePageInner({
   const [designBusy, setDesignBusy] = useState(false);
   const [designError, setDesignError] = useState<string | null>(null);
   const aiAvailable = isDesignGenConfigured();
+
+  // User-controllable transform overrides for the active design:
+  //   designScale  — multiplier on the placement's preset decal size.
+  //                  1.0 = preset default, 0.5 = half, 2.0 = double.
+  //   designRollZ  — radians of in-plane rotation (Z-roll). 0 = no twist.
+  // Reset when the user picks a new placement OR clears the design so each
+  // new design starts at the placement's clean default.
+  const [designScale, setDesignScale] = useState(1.0);
+  const [designRollZ, setDesignRollZ] = useState(0);
 
   // Immersive view modals (mirrored from PDP)
   const [arOpen, setArOpen] = useState(false);
@@ -220,15 +244,14 @@ function CustomizePageInner({
     track("design_generated", { product: product.name, source: "stock" });
   };
 
+  // Four simple placement zones. Each maps to a clear, bounded area on the
+  // garment. Hardcoded coordinates in Product3DViewer's getPlacementProps
+  // define the exact decal position + scale for each.
   const placements = [
-    { id: "chest_left", label: "Left chest" },
-    { id: "chest_center", label: "Center chest" },
-    { id: "large_center", label: "Large center", badge: "New", badgeType: "primary" },
-    { id: "sleeve_left_top", label: "Left sleeve top" },
-    { id: "sleeve_right_top", label: "Right sleeve top" },
-    { id: "back", label: "Back", badges: [{ text: "DTG", type: "default" }, { text: "New", type: "primary" }] },
-    { id: "label_outside", label: "Outside label", badges: [{ text: "DTG", type: "default" }] },
-    { id: "label_inside", label: "Inside label", badges: [{ text: "DTG", type: "default" }] },
+    { id: "front_chest",  label: "Front chest" },
+    { id: "back",         label: "Back" },
+    { id: "left_sleeve",  label: "Left hand" },
+    { id: "right_sleeve", label: "Right hand" },
   ];
   const [activePlacement, setActivePlacement] = useState(placements[0].id);
 
@@ -236,6 +259,15 @@ function CustomizePageInner({
   const totalPrice = product.price * quantity;
 
   const DRAFT_KEY = `hoodude.customize.draft.${product.id}`;
+
+  // Reset transform overrides when the user picks a different placement
+  // OR clears the design. Each new design starts at the placement preset
+  // (1.0× scale, 0° roll). Without this the previous design's slider values
+  // would carry into the new one which would be confusing.
+  useEffect(() => {
+    setDesignScale(1.0);
+    setDesignRollZ(0);
+  }, [activePlacement, designUrl]);
 
   // Restore a saved draft once, on first mount for this product.
   useEffect(() => {
@@ -532,7 +564,7 @@ function CustomizePageInner({
               standard embroidery). Black bar, white text — visible without
               shouting, on-brand instead of alert-blue. */}
           <AnimatePresence>
-            {(activePlacement === 'back' || activePlacement.startsWith('label')) && (
+            {activePlacement === 'back' && (
               <motion.div
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: "auto", opacity: 1 }}
@@ -567,25 +599,6 @@ function CustomizePageInner({
                     }`}
                   >
                     <span className="relative z-10">{p.label}</span>
-                    
-                    {(p.badge || p.badges) && (
-                      <div className="flex items-center gap-1">
-                        {p.badge && (
-                          <span className={`px-1.5 py-0.5 rounded-md text-[8px] font-semibold uppercase tracking-wider ${
-                            p.badgeType === "primary" ? "bg-brand text-white" : "bg-black/10 text-black/60"
-                          }`}>
-                            {p.badge}
-                          </span>
-                        )}
-                        {p.badges?.map((b) => (
-                          <span key={b.text} className={`px-1.5 py-0.5 rounded-md text-[8px] font-semibold uppercase tracking-wider ${
-                            b.type === "primary" ? "bg-brand text-white" : "bg-black/10 text-black/60"
-                          }`}>
-                            {b.text}
-                          </span>
-                        ))}
-                      </div>
-                    )}
 
                     {isActive && (
                       <motion.div
@@ -624,9 +637,96 @@ function CustomizePageInner({
                   resetSignal={resetSignal}
                   activePlacement={activePlacement}
                   designImageUrl={designUrl}
+                  designScaleMul={designScale}
+                  designRollZ={designRollZ}
                 />
               </Suspense>
             </ModelErrorBoundary>
+
+            {/* ── DESIGN CONTROLS PANEL ──
+                Surfaces whenever a design is applied so users have OBVIOUS
+                resize/rotate controls. Previously these were hidden gestures
+                (scroll = resize, shift-drag = rotate) which most users never
+                discovered. The panel makes them discoverable + labeled. */}
+            <AnimatePresence>
+              {designUrl && (
+                <motion.div
+                  initial={{ opacity: 0, x: 16 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 16 }}
+                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                  className="absolute top-4 right-4 z-30 w-[252px] bg-white/95 backdrop-blur-xl border border-black/[0.06] rounded-2xl shadow-[0_8px_32px_-12px_rgba(0,0,0,0.12)] p-4 flex flex-col gap-4"
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="block text-[9px] uppercase tracking-[0.3em] font-medium text-fg-faint mb-0.5">
+                        Adjust
+                      </span>
+                      <h4 className="text-[13px] font-semibold text-fg leading-tight">
+                        {placements.find((p) => p.id === activePlacement)?.label ?? "Design"}
+                      </h4>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setDesignScale(1.0);
+                        setDesignRollZ(0);
+                      }}
+                      className="text-[10px] text-fg-mute hover:text-fg underline underline-offset-4"
+                      title="Reset size and rotation to default"
+                    >
+                      Reset
+                    </button>
+                  </div>
+
+                  {/* SIZE slider — multiplier on the placement preset size. */}
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase tracking-[0.18em] font-medium text-fg-mute">Size</span>
+                      <span className="text-[11px] text-fg tabular-nums">
+                        {Math.round(designScale * 100)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0.3}
+                      max={2.0}
+                      step={0.02}
+                      value={designScale}
+                      onChange={(e) => setDesignScale(parseFloat(e.target.value))}
+                      className="w-full accent-black h-1 cursor-pointer"
+                      aria-label="Design size"
+                    />
+                  </div>
+
+                  {/* ROTATION slider — degrees of Z-roll in-plane twist. */}
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] uppercase tracking-[0.18em] font-medium text-fg-mute">Rotation</span>
+                      <span className="text-[11px] text-fg tabular-nums">
+                        {Math.round((designRollZ * 180) / Math.PI)}°
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-Math.PI}
+                      max={Math.PI}
+                      step={Math.PI / 90}
+                      value={designRollZ}
+                      onChange={(e) => setDesignRollZ(parseFloat(e.target.value))}
+                      className="w-full accent-black h-1 cursor-pointer"
+                      aria-label="Design rotation"
+                    />
+                  </div>
+
+                  <div className="border-t border-black/[0.06] pt-3 -mx-1">
+                    <p className="text-[10px] leading-relaxed text-fg-faint px-1">
+                      <span className="font-semibold text-fg-mute">Tip:</span>{" "}
+                      hold and drag on the model to move the design.
+                    </p>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* Drag-and-drop overlay — shows the moment the user drags an
                 image file over the workspace. Clearly affords "drop here". */}
