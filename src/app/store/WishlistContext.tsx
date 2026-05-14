@@ -7,6 +7,9 @@ interface WishlistContextValue {
   add: (productId: string) => void;
   remove: (productId: string) => void;
   clear: () => void;
+  isOpen: boolean;
+  openWishlist: () => void;
+  closeWishlist: () => void;
 }
 
 const WishlistContext = createContext<WishlistContextValue | null>(null);
@@ -27,6 +30,7 @@ function readStorage(): string[] {
 
 export function WishlistProvider({ children }: { children: ReactNode }) {
   const [ids, setIds] = useState<string[]>(() => readStorage());
+  const [isOpen, setIsOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -45,8 +49,11 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
       add: (id) => setIds((prev) => (prev.includes(id) ? prev : [...prev, id])),
       remove: (id) => setIds((prev) => prev.filter((p) => p !== id)),
       clear: () => setIds([]),
+      isOpen,
+      openWishlist: () => setIsOpen(true),
+      closeWishlist: () => setIsOpen(false),
     }),
-    [ids]
+    [ids, isOpen]
   );
 
   return <WishlistContext.Provider value={value}>{children}</WishlistContext.Provider>;

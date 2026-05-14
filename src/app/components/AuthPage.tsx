@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router";
 import { Mail, Lock, User as UserIcon, ArrowRight } from "lucide-react";
 import SiteHeader from "./SiteHeader";
+import PageHead from "./PageHead";
 import SiteFooter from "./SiteFooter";
 import { useAuth } from "../store/AuthContext";
 
@@ -25,37 +26,30 @@ export default function AuthPage({ onOpenCart, mode }: AuthPageProps) {
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (!email.includes("@") || password.length < 6) {
-      setError("Enter a valid email and a password of at least 6 characters.");
-      return;
-    }
-    if (isSignup && name.trim().length < 2) {
-      setError("Enter your full name.");
-      return;
-    }
     setLoading(true);
     try {
       if (isSignup) await signUp(name.trim(), email.trim(), password);
       else await signIn(email.trim(), password);
       navigate("/account");
-    } catch {
-      setError("Something went wrong. Try again.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-white flex flex-col" style={{ fontFamily: "'Poppins', sans-serif" }}>
+    <div className="min-h-screen bg-white flex flex-col">
+      <PageHead title={isSignup ? "Create account" : "Sign in"} noindex />
       <SiteHeader onOpenCart={onOpenCart} />
 
       <div className="flex-1 max-w-[440px] w-full mx-auto px-8 py-20">
-        <span className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#fa5d42] mb-3 block">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.3em] text-brand mb-3 block">
           {isSignup ? "Create account" : "Welcome back"}
         </span>
         <h1
           className="text-[36px] mb-2 leading-tight"
-          style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 700 }}
+          style={{ fontWeight: 600 }}
         >
           {isSignup ? "Join Hoodude." : "Sign in."}
         </h1>
@@ -98,7 +92,7 @@ export default function AuthPage({ onOpenCart, mode }: AuthPageProps) {
           </Field>
 
           {error && (
-            <p className="text-[12px] text-[#fa5d42] font-medium">{error}</p>
+            <p className="text-[12px] text-brand font-medium">{error}</p>
           )}
 
           {!isSignup && (
@@ -106,7 +100,7 @@ export default function AuthPage({ onOpenCart, mode }: AuthPageProps) {
               <label className="flex items-center gap-2 text-black/60">
                 <input type="checkbox" className="accent-black" /> Remember me
               </label>
-              <button type="button" className="text-black font-bold hover:text-[#fa5d42]">
+              <button type="button" className="text-black font-semibold hover:text-brand">
                 Forgot password?
               </button>
             </div>
@@ -115,7 +109,7 @@ export default function AuthPage({ onOpenCart, mode }: AuthPageProps) {
           <button
             type="submit"
             disabled={loading}
-            className="bg-black text-white h-12 rounded-full font-bold text-[13px] hover:bg-[#fa5d42] transition-colors flex items-center justify-center gap-2 disabled:opacity-40"
+            className="bg-black text-white h-12 rounded-full font-semibold text-[13px] hover:bg-brand transition-colors flex items-center justify-center gap-2 disabled:opacity-40"
           >
             {loading ? (
               <div className="size-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
@@ -128,7 +122,7 @@ export default function AuthPage({ onOpenCart, mode }: AuthPageProps) {
           </button>
         </form>
 
-        <div className="my-8 flex items-center gap-3 text-[11px] text-black/40 uppercase tracking-[0.3em] font-bold">
+        <div className="my-8 flex items-center gap-3 text-[11px] text-black/40 uppercase tracking-[0.3em] font-semibold">
           <div className="flex-1 h-px bg-black/10" />
           or
           <div className="flex-1 h-px bg-black/10" />
@@ -140,7 +134,7 @@ export default function AuthPage({ onOpenCart, mode }: AuthPageProps) {
               Already have an account?{" "}
               <button
                 onClick={() => navigate("/login")}
-                className="font-bold text-black underline underline-offset-4 hover:text-[#fa5d42]"
+                className="font-semibold text-black underline underline-offset-4 hover:text-brand"
               >
                 Sign in
               </button>
@@ -150,7 +144,7 @@ export default function AuthPage({ onOpenCart, mode }: AuthPageProps) {
               New to Hoodude?{" "}
               <button
                 onClick={() => navigate("/signup")}
-                className="font-bold text-black underline underline-offset-4 hover:text-[#fa5d42]"
+                className="font-semibold text-black underline underline-offset-4 hover:text-brand"
               >
                 Create account
               </button>

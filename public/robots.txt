@@ -1,0 +1,13 @@
+User-agent: *
+Allow: /
+Allow: /shop
+Allow: /product/
+Allow: /customize
+Allow: /wishlist
+Disallow: /account
+Disallow: /checkout
+Disallow: /cart
+Disallow: /api/
+Disallow: /*.json$
+
+Sitemap: https://hoodude.com/sitemap.xml

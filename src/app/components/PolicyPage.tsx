@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import { Plus, ChevronLeft, Mail, MessageCircle, Truck } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import SiteHeader from "./SiteHeader";
+import PageHead from "./PageHead";
 import SiteFooter from "./SiteFooter";
 
 interface PolicyPageProps {
@@ -138,17 +139,17 @@ const PAGES: Record<
         body: (
           <div className="flex flex-col gap-3">
             <span className="flex items-center gap-3">
-              <Mail size={16} className="text-[#fa5d42]" />
+              <Mail size={16} className="text-brand" />
               <a href="mailto:help@hoodude.store" className="underline">
                 help@hoodude.store
               </a>
             </span>
             <span className="flex items-center gap-3">
-              <MessageCircle size={16} className="text-[#fa5d42]" />
+              <MessageCircle size={16} className="text-brand" />
               Live chat — bottom right, Mon–Fri 9am–6pm GMT
             </span>
             <span className="flex items-center gap-3">
-              <Truck size={16} className="text-[#fa5d42]" />
+              <Truck size={16} className="text-brand" />
               Order help via the email receipt — fastest route
             </span>
           </div>
@@ -286,7 +287,8 @@ export default function PolicyPage({ onOpenCart, slug }: PolicyPageProps) {
   const [openIndex, setOpenIndex] = useState<number | null>(0);
 
   return (
-    <div className="min-h-screen bg-white" style={{ fontFamily: "'Poppins', sans-serif" }}>
+    <div className="min-h-screen bg-white">
+      <PageHead title={page.title} />
       <SiteHeader onOpenCart={onOpenCart} />
 
       <div className="max-w-[820px] mx-auto px-8 pt-12 pb-24">
@@ -297,12 +299,12 @@ export default function PolicyPage({ onOpenCart, slug }: PolicyPageProps) {
           <ChevronLeft size={14} /> Back
         </button>
 
-        <span className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#fa5d42] mb-4 block">
+        <span className="text-[10px] font-semibold uppercase tracking-[0.3em] text-brand mb-4 block">
           {page.eyebrow}
         </span>
         <h1
           className="text-[44px] md:text-[56px] leading-[1.02] tracking-tight mb-6"
-          style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 700 }}
+          style={{ fontWeight: 600 }}
         >
           {page.title}
         </h1>
@@ -320,7 +322,7 @@ export default function PolicyPage({ onOpenCart, slug }: PolicyPageProps) {
                     onClick={() => setOpenIndex(isOpen ? null : i)}
                     className="flex items-center justify-between w-full py-5 text-left"
                   >
-                    <span className="text-[16px] font-bold">{s.heading}</span>
+                    <span className="text-[16px] font-semibold">{s.heading}</span>
                     <div
                       className={`size-6 flex items-center justify-center transition-transform ${
                         isOpen ? "rotate-45" : ""
@@ -354,7 +356,7 @@ export default function PolicyPage({ onOpenCart, slug }: PolicyPageProps) {
               <section key={i}>
                 <h2
                   className="text-[22px] mb-4 tracking-tight"
-                  style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 700 }}
+                  style={{ fontWeight: 600 }}
                 >
                   {s.heading}
                 </h2>
@@ -370,7 +372,7 @@ export default function PolicyPage({ onOpenCart, slug }: PolicyPageProps) {
           </p>
           <button
             onClick={() => navigate("/contact")}
-            className="bg-black text-white h-11 px-6 rounded-full text-[13px] font-bold hover:bg-[#fa5d42] transition-colors"
+            className="bg-black text-white h-11 px-6 rounded-full text-[13px] font-semibold hover:bg-brand transition-colors"
           >
             Contact support →
           </button>

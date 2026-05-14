@@ -1,21 +1,22 @@
 import { useNavigate } from "react-router";
 import { Instagram, Facebook, Twitter, Send } from "lucide-react";
 import { useState } from "react";
+import { NAV_CATEGORIES, categoryHref } from "../utils/nav";
+import { subscribeNewsletter } from "../utils/api";
 
 export default function SiteFooter() {
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [subscribed, setSubscribed] = useState(false);
+  const [subscribing, setSubscribing] = useState(false);
+  const [subscribeError, setSubscribeError] = useState<string | null>(null);
 
   const columns = [
     {
       title: "Shop",
       links: [
         { label: "New Arrivals", to: "/shop" },
-        { label: "T-Shirts", to: "/shop?category=T-Shirts" },
-        { label: "Shirts", to: "/shop?category=Shirts" },
-        { label: "Hoodies", to: "/shop?category=Hoodies" },
-        { label: "Jackets", to: "/shop?category=Jackets" },
+        ...NAV_CATEGORIES.map((c) => ({ label: c, to: categoryHref(c) })),
       ],
     },
     {
@@ -51,21 +52,17 @@ export default function SiteFooter() {
 
   return (
     <footer
-      className="bg-[#0e0e0e] text-white"
-      style={{ fontFamily: "'Poppins', sans-serif" }}
+      className="bg-ink text-white"
+     
     >
       <div className="px-8 md:px-16 py-20">
         <div className="grid grid-cols-1 lg:grid-cols-[1.3fr_2.2fr_1fr] gap-12 mb-16">
           <div>
-            <h2
-              className="text-[42px] leading-none tracking-tight mb-5"
-              style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 700 }}
-            >
+            <h2 className="text-h2 font-semibold leading-none tracking-tight mb-5">
               HOODUDE
             </h2>
             <p className="text-[14px] text-white/60 leading-relaxed max-w-[320px]">
-              Modern wardrobe essentials. Designed for everyday movement, built to outlive the
-              season.
+              Streetwear essentials, made to live in.
             </p>
             <div className="flex items-center gap-2 mt-6">
               {[Instagram, Facebook, Twitter].map((Icon, i) => (
@@ -83,7 +80,7 @@ export default function SiteFooter() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
             {columns.map((col) => (
               <div key={col.title}>
-                <h4 className="text-[11px] font-bold uppercase tracking-[0.25em] text-white/50 mb-4">
+                <h4 className="text-[11px] font-semibold uppercase tracking-[0.25em] text-white/50 mb-4">
                   {col.title}
                 </h4>
                 <ul className="flex flex-col gap-2.5">
@@ -103,11 +100,11 @@ export default function SiteFooter() {
           </div>
 
           <div>
-            <h4 className="text-[11px] font-bold uppercase tracking-[0.25em] text-white/50 mb-4">
-              Newsletter
+            <h4 className="text-[11px] font-semibold uppercase tracking-[0.25em] text-white/50 mb-4">
+              Notebook
             </h4>
             <p className="text-[13px] text-white/60 mb-4 leading-relaxed">
-              10% off your first order. New drops, early access, no spam.
+              New drops and field notes. Twice a month, never spam.
             </p>
             {subscribed ? (
               <p className="text-[13px] text-white/80">
@@ -115,9 +112,20 @@ export default function SiteFooter() {
               </p>
             ) : (
               <form
-                onSubmit={(e) => {
+                onSubmit={async (e) => {
                   e.preventDefault();
-                  if (email.trim()) setSubscribed(true);
+                  const trimmed = email.trim();
+                  if (!trimmed || subscribing) return;
+                  setSubscribing(true);
+                  setSubscribeError(null);
+                  const res = await subscribeNewsletter(trimmed);
+                  setSubscribing(false);
+                  if (res.ok) {
+                    setSubscribed(true);
+                    setEmail("");
+                  } else {
+                    setSubscribeError(res.error ?? "Subscription failed. Try again.");
+                  }
                 }}
                 className="flex items-stretch border border-white/15 rounded-full overflow-hidden focus-within:border-white/40 transition-colors"
               >
@@ -127,16 +135,23 @@ export default function SiteFooter() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@email.com"
-                  className="flex-1 bg-transparent px-4 py-2.5 text-[13px] outline-none placeholder:text-white/30"
+                  disabled={subscribing}
+                  className="flex-1 bg-transparent px-4 py-2.5 text-[13px] outline-none placeholder:text-white/30 disabled:opacity-60"
                 />
                 <button
                   type="submit"
                   aria-label="Subscribe"
-                  className="px-4 bg-white text-black hover:bg-[#fa5d42] hover:text-white transition-colors"
+                  disabled={subscribing}
+                  className="px-4 bg-white text-black hover:bg-brand hover:text-white transition-colors disabled:opacity-60"
                 >
                   <Send size={14} strokeWidth={2} />
                 </button>
               </form>
+            )}
+            {subscribeError && !subscribed && (
+              <p className="text-[12px] text-brand mt-2" role="alert">
+                {subscribeError}
+              </p>
             )}
           </div>
         </div>

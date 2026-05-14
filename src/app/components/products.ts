@@ -288,11 +288,10 @@ export const products: Product[] = [
     description:
       "Loopknit terry sweatshirt with a relaxed drop-shoulder silhouette — ideal base garment for heavyweight streetwear labels.",
     stock: "Ready Stock",
-    image: UNSPLASH("1572495641004-28421ae29ed4"),
+    image: UNSPLASH("1620799140408-edc6dcb6d633"),
     gallery: [
-      UNSPLASH("1572495641004-28421ae29ed4"),
       UNSPLASH("1620799140408-edc6dcb6d633"),
-      UNSPLASH("1614093302611-8efc4de12407"),
+      UNSPLASH("1556821840-3a63f95609a7"),
     ],
   },
   {
@@ -380,6 +379,7 @@ export const products: Product[] = [
   },
 ];
 
-export function findProduct(id: string | null | undefined): Product {
-  return products.find((p) => p.id === id) ?? products[0];
+export function findProduct(id: string | null | undefined): Product | undefined {
+  if (!id) return undefined;
+  return products.find((p) => p.id === id);
 }

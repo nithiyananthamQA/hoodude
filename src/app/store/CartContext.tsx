@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, ReactNode } from "react";
+import { track } from "../utils/analytics";
 
 export interface CartItem {
   id: string;
@@ -10,12 +11,18 @@ export interface CartItem {
   size: string;
   price: number;
   quantity: number;
+  maxStock?: number;
 }
+
+const DEFAULT_STOCK_CAP = 10;
 
 interface CartContextValue {
   items: CartItem[];
   subtotal: number;
   itemCount: number;
+  isOpen: boolean;
+  openCart: () => void;
+  closeCart: () => void;
   add: (item: Omit<CartItem, "id"> & { id?: string }) => void;
   remove: (id: string) => void;
   updateQuantity: (id: string, quantity: number) => void;
@@ -44,6 +51,7 @@ function makeLineId(productId: string, color: string, size: string) {
 
 export function CartProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<CartItem[]>(() => readStorage());
+  const [isOpen, setIsOpen] = useState(false);
 
   useEffect(() => {
     try {
@@ -60,31 +68,62 @@ export function CartProvider({ children }: { children: ReactNode }) {
       items,
       subtotal,
       itemCount,
+      isOpen,
+      openCart: () => setIsOpen(true),
+      closeCart: () => setIsOpen(false),
       add(item) {
         const id = item.id ?? makeLineId(item.productId, item.color, item.size);
+        const cap = item.maxStock ?? DEFAULT_STOCK_CAP;
         setItems((prev) => {
           const existing = prev.find((p) => p.id === id);
+          const currentQty = existing?.quantity ?? 0;
+          const desiredQty = currentQty + item.quantity;
+          const finalQty = Math.min(desiredQty, cap);
+          // Confirmation is the caller's responsibility — they're the surface
+          // the user is looking at. CartContext stays silent so we don't pile
+          // a toast on top of their inline UI.
           if (existing) {
-            return prev.map((p) => (p.id === id ? { ...p, quantity: p.quantity + item.quantity } : p));
+            return prev.map((p) => (p.id === id ? { ...p, quantity: finalQty } : p));
           }
-          return [...prev, { ...item, id }];
+          return [...prev, { ...item, id, quantity: finalQty, maxStock: cap }];
+        });
+        track("add_to_cart", {
+          product_id: item.productId,
+          name: item.name,
+          color: item.color,
+          size: item.size,
+          quantity: item.quantity,
+          price: item.price,
         });
       },
       remove(id) {
+        const removed = items.find((p) => p.id === id);
         setItems((prev) => prev.filter((p) => p.id !== id));
+        if (removed) {
+          track("remove_from_cart", {
+            product_id: removed.productId,
+            name: removed.name,
+            quantity: removed.quantity,
+          });
+        }
       },
       updateQuantity(id, quantity) {
         setItems((prev) =>
           quantity <= 0
             ? prev.filter((p) => p.id !== id)
-            : prev.map((p) => (p.id === id ? { ...p, quantity } : p))
+            : prev.map((p) => {
+                if (p.id !== id) return p;
+                const cap = p.maxStock ?? DEFAULT_STOCK_CAP;
+                return { ...p, quantity: Math.min(quantity, cap) };
+              })
         );
+        track("update_cart_quantity", { line_id: id, quantity });
       },
       clear() {
         setItems([]);
       },
     };
-  }, [items]);
+  }, [items, isOpen]);
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
 }

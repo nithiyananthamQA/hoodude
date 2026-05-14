@@ -1,17 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0e0e0e" />
+    <title>HOODUDE | Style Redefined</title>
+    <meta name="description" content="Streetwear essentials made for the crew you keep. Built to wear, repeat, remember." />
+    <meta name="keywords" content="streetwear, hoodies, tshirts, custom apparel, graphic tees" />
+    <meta property="og:locale" content="en_US" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 
-  <!DOCTYPE html>
-  <html lang="en">
-    <head>
-      <meta charset="UTF-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>HOODUDE | Style Redefined</title>
-      <link rel="icon" type="image/png" href="/image.png" />
-      <style>html, body { height: 100%; margin: 0; } #root { height: 100%; }</style>
-    </head>
+    <link rel="icon" type="image/png" href="/image.png" />
+    <link rel="sitemap" type="application/xml" href="/sitemap.xml" />
+    <link rel="apple-touch-icon" href="/image.png" />
 
-    <body>
-      <div id="root"></div>
-      <script type="module" src="/src/main.tsx"></script>
-    </body>
-  </html>
-  
+    <!-- Preconnect to image CDNs and font hosts so the first byte from each
+         arrives ~50–150ms sooner. dns-prefetch is the cheaper fallback. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://images.unsplash.com" crossorigin />
+    <link rel="dns-prefetch" href="https://cdn.shopify.com" />
+    <link rel="dns-prefetch" href="https://flagcdn.com" />
+    <link rel="dns-prefetch" href="https://img.youtube.com" />
+
+    <!-- LCP hint: hero image lands fast on first load. -->
+    <link rel="preload" as="image" href="/hero-team.png" fetchpriority="high" />
+
+    <!-- Google's model-viewer for AR (iOS Quick Look + Android Scene Viewer).
+         Loaded as ES module so the <model-viewer> custom element registers
+         globally. Used programmatically by ImmersiveControls. -->
+    <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.5.0/model-viewer.min.js"></script>
+
+    <style>html, body { height: 100%; margin: 0; } #root { height: 100%; }</style>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

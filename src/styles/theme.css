@@ -3,9 +3,33 @@
 :root {
   --font-size: 16px;
 
-  /* Primary font stack — Poppins everywhere */
+  /* Type families. Sans for everything; serif for editorial display moments
+     (display-tier headlines, occasional pull-quote). */
   --font-sans: 'Poppins', Arial, sans-serif;
-  --font-mono: ui-monospace, 'Space Mono', monospace;
+  --font-serif: 'Instrument Serif', 'Times New Roman', Georgia, serif;
+  --font-mono: 'Poppins', Arial, sans-serif;
+
+  /* Editorial type scale. Fluid via clamp(): scales from min on phones to
+     max on desktop. Reference these tokens, not magic px values. */
+  --scale-display: clamp(56px, 8vw, 96px);
+  --scale-h1: clamp(40px, 5.5vw, 72px);
+  --scale-h2: clamp(32px, 4vw, 48px);
+  --scale-h3: clamp(22px, 2.4vw, 28px);
+  --scale-eyebrow: 11px;
+  --scale-body-lg: 17px;
+  --scale-body: 15px;
+  --scale-meta: 13px;
+  --scale-caption: 11px;
+
+  /* Three-tier text color scale. Replaces the scattered text-black/30..85
+     stops. Use text-fg / text-fg-mute / text-fg-faint as Tailwind utilities. */
+  --fg: #0a0a0a;                       /* high — titles, prices, active */
+  --fg-mute: rgba(10, 10, 10, 0.55);   /* mid — body, secondary */
+  --fg-faint: rgba(10, 10, 10, 0.35);  /* low — meta, inactive */
+
+  /* Brand tokens */
+  --brand-accent: #fa5d42;  /* Hoodude orange */
+  --brand-ink: #0e0e0e;     /* Near-black brand text */
 
   --background: #ffffff;
   --foreground: oklch(0.145 0 0);
@@ -85,7 +109,28 @@
 
 @theme inline {
   --font-sans: var(--font-sans);
+  --font-serif: var(--font-serif);
   --font-mono: var(--font-mono);
+
+  /* Expose brand tokens as Tailwind utilities: bg-brand, text-brand, bg-ink, etc. */
+  --color-brand: var(--brand-accent);
+  --color-ink: var(--brand-ink);
+
+  /* Three-tier text scale as Tailwind colors: text-fg, text-fg-mute, text-fg-faint */
+  --color-fg: var(--fg);
+  --color-fg-mute: var(--fg-mute);
+  --color-fg-faint: var(--fg-faint);
+
+  /* Editorial type scale exposed as Tailwind text-* utilities */
+  --text-display: var(--scale-display);
+  --text-h1: var(--scale-h1);
+  --text-h2: var(--scale-h2);
+  --text-h3: var(--scale-h3);
+  --text-eyebrow: var(--scale-eyebrow);
+  --text-body-lg: var(--scale-body-lg);
+  --text-body: var(--scale-body);
+  --text-meta: var(--scale-meta);
+  --text-caption: var(--scale-caption);
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -210,6 +255,37 @@
     line-height: 1.5;
   }
 
+  /* Cap inline emphasis at semibold — never bold. Differentiate with color
+     (text-black vs text-black/50) instead of weight. */
+  strong, b {
+    font-weight: 600;
+  }
+
+  /* Standard interactive button press effect. All buttons use this. */
+  @layer utilities {
+    .btn-press {
+      @apply active:scale-[0.97] transition-transform duration-150;
+    }
+    .btn-press-sm {
+      @apply active:scale-[0.95] transition-transform duration-150;
+    }
+
+    /* Icon sizing scale. Use instead of magic size-* values. */
+    .icon-xs { width: 12px; height: 12px; }
+    .icon-sm { width: 14px; height: 14px; }
+    .icon-md { width: 16px; height: 16px; }
+    .icon-lg { width: 20px; height: 20px; }
+    .icon-xl { width: 24px; height: 24px; }
+
+    /* Spacing scale rhythm (2px base → 8x scale). */
+    .gap-xs { gap: 0.375rem; }
+    .gap-sm { gap: 0.5rem; }
+    .gap-md { gap: 0.75rem; }
+    .gap-lg { gap: 1rem; }
+    .gap-xl { gap: 1.5rem; }
+    .gap-2xl { gap: 2rem; }
+  }
+
   @keyframes marquee {
     0% {
       transform: translateX(0%);
@@ -227,11 +303,70 @@
     animation: marquee 20s linear infinite;
   }
 
+  @keyframes grain {
+    0%, 100% { transform: translate(0, 0); }
+    10% { transform: translate(-5%, -10%); }
+    20% { transform: translate(-15%, 5%); }
+    30% { transform: translate(7%, -25%); }
+    40% { transform: translate(-5%, 25%); }
+    50% { transform: translate(-15%, 10%); }
+    60% { transform: translate(15%, 0%); }
+    70% { transform: translate(0%, 15%); }
+    80% { transform: translate(3%, 35%); }
+    90% { transform: translate(-10%, 10%); }
+  }
+
+  .animate-grain {
+    animation: grain 8s steps(10) infinite;
+  }
+
+  @keyframes skeleton-shimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(200%); }
+  }
+
+  .animate-skeleton-shimmer {
+    animation: skeleton-shimmer 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  }
+
   .no-scrollbar::-webkit-scrollbar {
     display: none;
   }
   .no-scrollbar {
     -ms-overflow-style: none;
     scrollbar-width: none;
+  }
+
+  /* Screen-reader only content. Hidden visually but announced to a11y tools.
+     Also supports focus:not-sr-only for skip links. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+
+  /* Serif utility for editorial display moments. Use sparingly — one serif
+     accent per section, never mixed with another. */
+  .font-serif {
+    font-family: var(--font-serif);
+  }
+
+  /* Respect users who've asked the OS for reduced motion. Marquees, parallax,
+     light leaks, grain, and all framer-motion animations collapse to instant. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }

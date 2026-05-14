@@ -1,12 +1,13 @@
-import { ChevronRight, SlidersHorizontal, Heart } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { ChevronRight, Check } from "lucide-react";
+import { useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { motion } from "motion/react";
 import { products } from "./products";
 import SiteHeader from "./SiteHeader";
+import PageHead, { itemListSchema, breadcrumbSchema } from "./PageHead";
 import SiteFooter from "./SiteFooter";
 import { useWishlist } from "../store/WishlistContext";
-import { formatPrice } from "../utils/currency";
+import ProductCard from "./ProductCard";
 import {
   Select,
   SelectContent,
@@ -31,18 +32,32 @@ const SORT_OPTIONS: { id: SortId; label: string }[] = [
 export default function ShopPage({ onOpenCart }: ShopPageProps) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const urlCategory = searchParams.get("category");
-  
-  const [activeCategory, setActiveCategory] = useState<string>(urlCategory ?? "all");
-  const [activeSize, setActiveSize] = useState<string>("all");
-  const [availability, setAvailability] = useState<string[]>([]);
-  const [sort, setSort] = useState<SortId>("featured");
-  
-  const { has: inWishlist, toggle: toggleWishlist } = useWishlist();
 
-  useEffect(() => {
-    setActiveCategory(urlCategory ?? "all");
-  }, [urlCategory]);
+  const activeCategory = searchParams.get("category") ?? "all";
+  const activeSize = searchParams.get("size") ?? "all";
+  const inStockOnly = searchParams.get("stock") === "in";
+  const sort = (searchParams.get("sort") as SortId) ?? "featured";
+  const availability = inStockOnly ? ["In stock"] : [];
+
+  const updateParams = (next: Record<string, string | null>) => {
+    setSearchParams(
+      (prev) => {
+        const params = new URLSearchParams(prev);
+        Object.entries(next).forEach(([k, v]) => {
+          if (v === null || v === "" || v === "all") params.delete(k);
+          else params.set(k, v);
+        });
+        return params;
+      },
+      { replace: true }
+    );
+  };
+
+  const setActiveCategory = (cat: string) => updateParams({ category: cat });
+  const setActiveSize = (sz: string) => updateParams({ size: sz });
+  const setSort = (s: SortId) => updateParams({ sort: s === "featured" ? null : s });
+
+  const { has: inWishlist, toggle: toggleWishlist } = useWishlist();
 
   const filtered = useMemo(() => {
     let base = [...products];
@@ -78,23 +93,46 @@ export default function ShopPage({ onOpenCart }: ShopPageProps) {
   }, [activeCategory, activeSize, availability, sort]);
 
   const resetFilters = () => {
-    setActiveCategory("all");
-    setActiveSize("all");
-    setAvailability([]);
-    setSearchParams({});
+    setSearchParams({}, { replace: true });
   };
 
-  const toggleAvailability = (status: string) => {
-    setAvailability(prev => 
-      prev.includes(status) ? prev.filter(s => s !== status) : [status]
-    );
+  const toggleAvailability = (_status: string) => {
+    updateParams({ stock: inStockOnly ? null : "in" });
   };
 
   return (
     <div
-      className="min-h-screen bg-white text-black selection:bg-[#fa5d42] selection:text-white"
-      style={{ fontFamily: "'Poppins', sans-serif" }}
+      className="min-h-screen bg-white text-black selection:bg-brand selection:text-white"
+     
     >
+      <PageHead
+        title={activeCategory === "all" ? "Shop" : activeCategory.replace(/^\w/, (c) => c.toUpperCase())}
+        description={`Browse ${filtered.length} pieces from the HOODUDE collection.`}
+        canonical={activeCategory === "all" ? "/shop" : `/shop?category=${encodeURIComponent(activeCategory)}`}
+        jsonLd={[
+          itemListSchema({
+            name: activeCategory === "all" ? "HOODUDE Collection" : activeCategory,
+            items: filtered.slice(0, 24).map((p) => ({
+              name: p.name,
+              path: `/product/${p.id}`,
+              image: p.image,
+              price: p.price,
+            })),
+          }),
+          breadcrumbSchema(
+            activeCategory === "all"
+              ? [
+                  { name: "Home", path: "/" },
+                  { name: "Shop", path: "/shop" },
+                ]
+              : [
+                  { name: "Home", path: "/" },
+                  { name: "Shop", path: "/shop" },
+                  { name: activeCategory, path: `/shop?category=${encodeURIComponent(activeCategory)}` },
+                ]
+          ),
+        ]}
+      />
       <SiteHeader onOpenCart={onOpenCart} />
 
       <main className="w-full pt-12 pb-24">
@@ -111,8 +149,8 @@ export default function ShopPage({ onOpenCart }: ShopPageProps) {
           <div className="flex items-end justify-between gap-6">
             <div>
               <h1
-                className="text-[48px] md:text-[64px] text-[#0e0e0e] tracking-[-2px] leading-[1] capitalize"
-                style={{ fontFamily: '"Poppins", sans-serif', fontWeight: 700 }}
+                className="text-[48px] md:text-[64px] text-ink tracking-[-2px] leading-[1] capitalize"
+                style={{ fontWeight: 600 }}
               >
                 {activeCategory === "all" ? "Our Collection" : activeCategory}
               </h1>
@@ -121,171 +159,134 @@ export default function ShopPage({ onOpenCart }: ShopPageProps) {
               </p>
             </div>
             
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <SlidersHorizontal size={14} className="text-black/40" />
-                <span className="text-[13px] text-black/50 font-medium">Sort by</span>
-                <Select value={sort} onValueChange={(v) => setSort(v as SortId)}>
-                  <SelectTrigger
-                    size="sm"
-                    className="h-9 min-w-[180px] rounded-lg border-black/10 bg-white text-[13px] font-medium text-black shadow-sm hover:border-black/20 focus:ring-2 focus:ring-black/10 focus:ring-offset-0 data-[placeholder]:text-black/40"
+            <Select value={sort} onValueChange={(v) => setSort(v as SortId)}>
+              <SelectTrigger className="!h-auto !w-auto !min-w-0 !border-0 !bg-transparent !shadow-none !rounded-none !px-0 !py-1 !gap-1.5 text-[13px] font-medium text-black/65 hover:text-black focus:!ring-0 focus-visible:!ring-0 data-[state=open]:text-black">
+                <span className="flex items-baseline gap-1.5 whitespace-nowrap">
+                  <span className="text-black/40">Sort by</span>
+                  <SelectValue placeholder="Featured" />
+                </span>
+              </SelectTrigger>
+              <SelectContent
+                align="end"
+                sideOffset={10}
+                className="min-w-[220px] rounded-2xl border-black/10 bg-white p-1.5 shadow-[0_16px_40px_-12px_rgba(0,0,0,0.16)]"
+              >
+                {SORT_OPTIONS.map((opt) => (
+                  <SelectItem
+                    key={opt.id}
+                    value={opt.id}
+                    className="rounded-xl px-4 py-2.5 text-[13px] font-medium text-black/65 cursor-pointer data-[highlighted]:bg-black/5 data-[highlighted]:text-black data-[state=checked]:bg-black data-[state=checked]:text-white focus:bg-black/5 focus:text-black"
                   >
-                    <SelectValue placeholder="Featured" />
-                  </SelectTrigger>
-                  <SelectContent
-                    align="end"
-                    className="min-w-[200px] rounded-lg border-black/10 bg-white p-1 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.12)]"
-                  >
-                    {SORT_OPTIONS.map((opt) => (
-                      <SelectItem
-                        key={opt.id}
-                        value={opt.id}
-                        className="rounded-md px-2.5 py-2 text-[13px] font-medium text-black/70 data-[highlighted]:bg-black/5 data-[highlighted]:text-black data-[state=checked]:text-black focus:bg-black/5 focus:text-black"
-                      >
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
         </div>
 
         {/* Global Filter Bar */}
-        <section className="sticky top-20 z-40 bg-white/80 backdrop-blur-md border-y border-black/5 px-5 md:px-10 py-5">
-           <div className="flex flex-wrap items-center justify-between gap-8">
-              <div className="flex items-center gap-8">
-                 {/* Categories Horizontal */}
-                 <div className="flex items-center gap-2">
-                    {["all", "round neck", "polo", "hoodie", "sweatshirt", "oversized"].map(cat => (
-                      <button 
-                        key={cat}
-                        onClick={() => setActiveCategory(cat)}
-                        className={`px-4 py-2 rounded-full text-[13px] font-bold transition-all capitalize ${
-                          activeCategory === cat ? "bg-black text-white" : "text-black/40 hover:text-black"
-                        }`}
-                      >
-                        {cat}
-                      </button>
-                    ))}
-                 </div>
+        <section className="sticky top-20 z-40 bg-white/85 backdrop-blur-md border-y border-black/5 px-5 md:px-10 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-x-8 gap-y-3">
+            {/* Categories — primary nav */}
+            <div className="flex flex-wrap items-center gap-1">
+              {["all", "round neck", "polo", "hoodie", "sweatshirt", "oversized"].map((cat) => {
+                const isActive = activeCategory === cat;
+                return (
+                  <button
+                    key={cat}
+                    onClick={() => setActiveCategory(cat)}
+                    className={`h-9 px-4 rounded-full text-[13px] font-medium transition-colors capitalize ${
+                      isActive
+                        ? "bg-black text-white"
+                        : "text-black/55 hover:text-black hover:bg-black/[0.04]"
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                );
+              })}
+            </div>
 
-                 <div className="w-px h-6 bg-black/5" />
-
-                 {/* Sizes */}
-                 <div className="flex items-center gap-1.5">
-                    {["S", "M", "L", "XL", "XXL", "3XL"].map(sz => (
-                      <button 
-                        key={sz}
-                        onClick={() => setActiveSize(sz === activeSize ? "all" : sz)}
-                        className={`size-10 flex items-center justify-center rounded-full text-[11px] font-bold transition-all border ${
-                          activeSize === sz ? "bg-black text-white border-black" : "bg-transparent text-black/20 border-black/5 hover:border-black/20"
-                        }`}
-                      >
-                        {sz}
-                      </button>
-                    ))}
-                 </div>
-                 
-                 <div className="w-px h-6 bg-black/5" />
-
-                 {/* Availability */}
-                 <div className="flex items-center gap-2">
-                    {["In stock", "Out of stock"].map(opt => (
-                      <button 
-                        key={opt}
-                        onClick={() => toggleAvailability(opt)}
-                        className={`px-4 py-2 rounded-full text-[12px] font-bold transition-all border ${
-                          availability.includes(opt) ? "bg-black text-white border-black" : "bg-white text-black/40 border-black/5"
-                        }`}
-                      >
-                        {opt}
-                      </button>
-                    ))}
-                 </div>
+            {/* Refinements — quiet right cluster */}
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-0.5">
+                <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-black/35 mr-2.5">
+                  Size
+                </span>
+                {["S", "M", "L", "XL", "XXL", "3XL"].map((sz) => {
+                  const isActive = activeSize === sz;
+                  return (
+                    <button
+                      key={sz}
+                      onClick={() => setActiveSize(sz === activeSize ? "all" : sz)}
+                      className={`size-11 md:size-9 flex items-center justify-center rounded-full text-[12px] md:text-[11px] font-semibold transition-colors ${
+                        isActive
+                          ? "bg-black text-white"
+                          : "text-black/45 hover:bg-black/[0.06] hover:text-black"
+                      }`}
+                    >
+                      {sz}
+                    </button>
+                  );
+                })}
               </div>
 
-              <button 
-                onClick={resetFilters}
-                className="text-[10px] font-bold tracking-widest uppercase text-[#fa5d42] hover:opacity-70 transition-all underline underline-offset-4"
+              <button
+                onClick={() => toggleAvailability("In stock")}
+                className={`flex items-center gap-2 h-9 px-3.5 rounded-full text-[12px] font-medium transition-colors ${
+                  availability.includes("In stock")
+                    ? "bg-black text-white"
+                    : "text-black/55 hover:bg-black/[0.04] hover:text-black"
+                }`}
               >
-                Reset filters
+                {availability.includes("In stock") && (
+                  <Check size={12} strokeWidth={2.5} />
+                )}
+                In stock only
               </button>
-           </div>
+
+              <button
+                onClick={resetFilters}
+                className="text-[12px] font-medium text-black/40 hover:text-black transition-colors"
+              >
+                Reset
+              </button>
+            </div>
+          </div>
         </section>
 
         {/* Full Width Grid */}
         <section className="px-5 md:px-10 py-12">
           {filtered.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-32 text-center bg-[#fafafa] rounded-[32px] border border-black/5 mx-5 md:mx-10">
+            <div className="flex flex-col items-center justify-center py-32 text-center bg-[#f5f5f5] rounded-[32px] border border-black/5 mx-5 md:mx-10">
               <span className="text-[14px] text-black/40 font-medium tracking-tight">Zero matches found in this protocol.</span>
               <button
                 onClick={resetFilters}
-                className="mt-6 px-10 py-4 rounded-full bg-[#0e0e0e] text-white text-[13px] font-bold hover:bg-[#fa5d42] transition-all"
+                className="mt-6 px-10 py-4 rounded-full bg-ink text-white text-[13px] font-semibold hover:bg-brand transition-all"
               >
                 Reset all filters
               </button>
             </div>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-x-4 gap-y-16">
-              {filtered.map((p, idx) => {
-                const saved = inWishlist(p.id);
-                return (
-                  <motion.div
-                    key={p.id}
-                    initial={{ opacity: 0, y: 20 }}
-                    whileInView={{ opacity: 1, y: 0 }}
-                    viewport={{ once: true }}
-                    transition={{ delay: idx % 5 * 0.05 }}
-                    className="cursor-pointer group"
-                    onClick={() => navigate(`/product?id=${p.id}`)}
-                  >
-                    <div className="aspect-[3/4] rounded-xl overflow-hidden mb-[20px] bg-[#f5f5f5] relative">
-                      <img
-                        src={p.image}
-                        alt={p.name}
-                        className="w-full h-full object-cover transition-transform duration-1000 group-hover:scale-110"
-                      />
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleWishlist(p.id);
-                        }}
-                        className={`absolute top-4 right-4 size-10 rounded-full flex items-center justify-center transition-all duration-300 ${
-                          saved
-                            ? "bg-[#fa5d42] text-white"
-                            : "bg-white/90 text-black hover:bg-[#fa5d42] hover:text-white backdrop-blur-md opacity-0 group-hover:opacity-100"
-                        }`}
-                      >
-                        <Heart
-                          size={16}
-                          className={saved ? "fill-white" : ""}
-                        />
-                      </button>
-                    </div>
-                    <div className="space-y-3">
-                      <div className="flex items-start justify-between gap-4">
-                         <h3 className="text-[16px] text-black tracking-tight font-medium line-clamp-2 leading-tight">
-                           {p.name}
-                         </h3>
-                         <div className="flex items-center gap-1.5 mt-1">
-                            {p.colors.slice(0, 3).map((c) => (
-                              <div
-                                key={c.name}
-                                className="size-2 rounded-full border border-black/5"
-                                style={{ backgroundColor: c.hex }}
-                              />
-                            ))}
-                         </div>
-                      </div>
-                      <p className="text-[16px] text-black font-black tabular-nums">
-                        {formatPrice(p.price)}
-                      </p>
-                    </div>
-                  </motion.div>
-                );
-              })}
+              {filtered.map((p, idx) => (
+                <motion.div
+                  key={p.id}
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ delay: (idx % 5) * 0.05 }}
+                >
+                  <ProductCard
+                    variant="shop"
+                    product={p}
+                    saved={inWishlist(p.id)}
+                    onClick={() => navigate(`/product/${p.id}`)}
+                    onToggleSave={() => toggleWishlist(p.id)}
+                  />
+                </motion.div>
+              ))}
             </div>
           )}
         </section>

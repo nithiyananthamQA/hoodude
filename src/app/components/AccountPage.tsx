@@ -2,10 +2,14 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { User as UserIcon, Package, MapPin, Heart, LogOut, ChevronRight } from "lucide-react";
 import SiteHeader from "./SiteHeader";
+import PageHead from "./PageHead";
 import SiteFooter from "./SiteFooter";
 import { useAuth } from "../store/AuthContext";
 import { useWishlist } from "../store/WishlistContext";
+import { useCart } from "../store/CartContext";
+import { useOrders } from "../store/OrderContext";
 import { formatPrice } from "../utils/currency";
+import { toast } from "sonner";
 
 interface AccountPageProps {
   onOpenCart: () => void;
@@ -17,6 +21,35 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
   const navigate = useNavigate();
   const { user, isAuthenticated, signOut } = useAuth();
   const { ids: wishlistIds } = useWishlist();
+  const { items: cartItems, clear: clearCart } = useCart();
+  const { orders } = useOrders();
+
+  const handleSignOut = () => {
+    if (cartItems.length === 0) {
+      signOut();
+      navigate("/");
+      return;
+    }
+    toast("Sign out — keep your bag?", {
+      description: `${cartItems.length} ${cartItems.length === 1 ? "item is" : "items are"} still in your bag on this device.`,
+      duration: 12000,
+      action: {
+        label: "Keep & sign out",
+        onClick: () => {
+          signOut();
+          navigate("/");
+        },
+      },
+      cancel: {
+        label: "Clear & sign out",
+        onClick: () => {
+          clearCart();
+          signOut();
+          navigate("/");
+        },
+      },
+    });
+  };
   const [tab, setTab] = useState<Tab>("orders");
 
   useEffect(() => {
@@ -25,36 +58,20 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
 
   if (!user) return null;
 
-  const mockOrders = [
-    {
-      id: "HD-A39B21",
-      date: "Apr 12, 2026",
-      status: "Delivered",
-      total: 670,
-      items: 3,
-    },
-    {
-      id: "HD-9C72F0",
-      date: "Mar 28, 2026",
-      status: "In transit",
-      total: 245,
-      items: 1,
-    },
-  ];
-
   return (
-    <div className="min-h-screen bg-white" style={{ fontFamily: "'Poppins', sans-serif" }}>
+    <div className="min-h-screen bg-white">
+      <PageHead title="Account" noindex />
       <SiteHeader onOpenCart={onOpenCart} />
 
       <div className="max-w-[1080px] mx-auto px-8 pt-12 pb-24">
         <div className="flex items-center gap-5 mb-10">
-          <div className="size-16 rounded-full bg-black text-white flex items-center justify-center text-[24px] font-bold">
+          <div className="size-16 rounded-full bg-black text-white flex items-center justify-center text-[24px] font-semibold">
             {user.name[0]?.toUpperCase()}
           </div>
           <div>
             <h1
               className="text-[32px] tracking-tight leading-none"
-              style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 700 }}
+              style={{ fontWeight: 600 }}
             >
               Hi, {user.name.split(" ")[0]}.
             </h1>
@@ -84,7 +101,7 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
                     {t.label}
                   </span>
                   {t.id === "wishlist" && wishlistIds.length > 0 && (
-                    <span className={`text-[11px] font-bold ${active ? "text-white" : "text-[#fa5d42]"}`}>
+                    <span className={`text-[11px] font-semibold ${active ? "text-white" : "text-brand"}`}>
                       {wishlistIds.length}
                     </span>
                   )}
@@ -92,10 +109,7 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
               );
             })}
             <button
-              onClick={() => {
-                signOut();
-                navigate("/");
-              }}
+              onClick={handleSignOut}
               className="flex items-center gap-3 px-4 h-11 rounded-lg text-black/70 hover:bg-black/5 mt-4 text-[13px] font-medium"
             >
               <LogOut size={15} />
@@ -108,45 +122,69 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
               <div>
                 <h2
                   className="text-[24px] mb-6"
-                  style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 700 }}
+                  style={{ fontWeight: 600 }}
                 >
                   Orders
                 </h2>
                 <div className="flex flex-col gap-3">
-                  {mockOrders.map((o) => (
-                    <div
-                      key={o.id}
-                      className="flex items-center justify-between border border-black/10 rounded-2xl p-5 hover:border-black transition-colors"
-                    >
-                      <div className="flex flex-col gap-1">
-                        <span className="text-[12px] font-bold text-black/50 uppercase tracking-wider">
-                          {o.id}
-                        </span>
-                        <span className="text-[15px] font-bold">
-                          {o.items} {o.items === 1 ? "item" : "items"} · {formatPrice(o.total)}
-                        </span>
-                        <span className="text-[12px] text-black/50">{o.date}</span>
+                  {orders.length === 0 ? (
+                    <div className="flex flex-col items-center text-center py-16 border border-dashed border-black/10 rounded-2xl gap-3">
+                      <div className="size-14 rounded-full bg-black/5 flex items-center justify-center">
+                        <Package size={22} strokeWidth={1.4} className="text-black/40" />
                       </div>
-                      <div className="flex items-center gap-4">
-                        <span
-                          className={`text-[11px] font-bold uppercase tracking-wider px-3 py-1 rounded-full ${
-                            o.status === "Delivered"
-                              ? "bg-green-50 text-green-700"
-                              : "bg-[#fa5d42]/10 text-[#fa5d42]"
-                          }`}
-                        >
-                          {o.status}
-                        </span>
-                        <ChevronRight size={16} className="text-black/40" />
+                      <div>
+                        <p className="text-[15px] font-semibold mb-1">No orders yet</p>
+                        <p className="text-[12px] text-black/50 max-w-[280px]">
+                          Your placed orders will appear here. They sync to this device automatically.
+                        </p>
                       </div>
+                      <button
+                        onClick={() => navigate("/shop")}
+                        className="mt-2 px-6 h-11 bg-black text-white rounded-full text-[13px] font-semibold hover:bg-brand transition-colors"
+                      >
+                        Start shopping
+                      </button>
                     </div>
-                  ))}
-                  <button
-                    onClick={() => navigate("/shop")}
-                    className="text-center text-[13px] font-bold text-black/60 hover:text-black mt-4 h-12 border border-dashed border-black/15 rounded-xl hover:border-black transition-colors"
-                  >
-                    Shop new arrivals →
-                  </button>
+                  ) : (
+                    orders.map((o) => {
+                      const itemCount = o.items.reduce((sum, i) => sum + i.quantity, 0);
+                      const placed = new Date(o.placedAt).toLocaleDateString(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      });
+                      return (
+                        <div
+                          key={o.id}
+                          className="flex items-center justify-between border border-black/10 rounded-2xl p-5 hover:border-black transition-colors"
+                        >
+                          <div className="flex flex-col gap-1">
+                            <span className="text-[12px] font-semibold text-black/50 uppercase tracking-wider">
+                              {o.id}
+                            </span>
+                            <span className="text-[15px] font-semibold">
+                              {itemCount} {itemCount === 1 ? "item" : "items"} · {formatPrice(o.total)}
+                            </span>
+                            <span className="text-[12px] text-black/50">{placed}</span>
+                          </div>
+                          <div className="flex items-center gap-4">
+                            <span
+                              className={`text-[11px] font-semibold uppercase tracking-wider px-3 py-1 rounded-full ${
+                                o.status === "Delivered"
+                                  ? "bg-green-50 text-green-700"
+                                  : o.status === "Cancelled"
+                                  ? "bg-red-50 text-red-700"
+                                  : "bg-brand/10 text-brand"
+                              }`}
+                            >
+                              {o.status}
+                            </span>
+                            <ChevronRight size={16} className="text-black/40" />
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               </div>
             )}
@@ -155,7 +193,7 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
               <div>
                 <h2
                   className="text-[24px] mb-6"
-                  style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 700 }}
+                  style={{ fontWeight: 600 }}
                 >
                   Profile
                 </h2>
@@ -163,7 +201,7 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
                   <Row label="Name" value={user.name} />
                   <Row label="Email" value={user.email} />
                   <Row label="Member since" value="April 2026" />
-                  <button className="self-start text-[12px] font-bold uppercase tracking-[0.25em] text-black/60 hover:text-black">
+                  <button className="self-start text-[12px] font-semibold uppercase tracking-[0.25em] text-black/60 hover:text-black">
                     Edit profile
                   </button>
                 </div>
@@ -174,7 +212,7 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
               <div>
                 <h2
                   className="text-[24px] mb-6"
-                  style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 700 }}
+                  style={{ fontWeight: 600 }}
                 >
                   Addresses
                 </h2>
@@ -185,7 +223,7 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
                   </p>
                   <button
                     onClick={() => navigate("/shop")}
-                    className="bg-black text-white px-6 h-11 rounded-full text-[13px] font-bold hover:bg-[#fa5d42] transition-colors"
+                    className="bg-black text-white px-6 h-11 rounded-full text-[13px] font-semibold hover:bg-brand transition-colors"
                   >
                     Start shopping
                   </button>
@@ -197,7 +235,7 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
               <div>
                 <h2
                   className="text-[24px] mb-6"
-                  style={{ fontFamily: "'Poppins', sans-serif", fontWeight: 700 }}
+                  style={{ fontWeight: 600 }}
                 >
                   Wishlist
                 </h2>
@@ -207,7 +245,7 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
                 </p>
                 <button
                   onClick={() => navigate("/wishlist")}
-                  className="bg-black text-white px-6 h-11 rounded-full text-[13px] font-bold hover:bg-[#fa5d42] transition-colors"
+                  className="bg-black text-white px-6 h-11 rounded-full text-[13px] font-semibold hover:bg-brand transition-colors"
                 >
                   Open wishlist →
                 </button>
@@ -225,7 +263,7 @@ export default function AccountPage({ onOpenCart }: AccountPageProps) {
 function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between text-[13px] border-b border-black/5 pb-4 last:border-b-0 last:pb-0">
-      <span className="text-black/50 uppercase tracking-wider font-bold text-[11px]">
+      <span className="text-black/50 uppercase tracking-wider font-semibold text-[11px]">
         {label}
       </span>
       <span className="font-medium">{value}</span>

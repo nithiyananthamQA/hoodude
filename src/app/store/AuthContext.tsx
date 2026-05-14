@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, ReactNode } from "react";
+import { identify, track } from "../utils/analytics";
 
 export interface User {
   id: string;
@@ -45,21 +46,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       user,
       isAuthenticated: !!user,
-      async signIn(email) {
+      async signIn(email, password) {
+        if (!email.includes("@") || !email.includes(".")) {
+          throw new Error("Enter a valid email address.");
+        }
+        if (!password || password.length < 8) {
+          throw new Error("Password must be at least 8 characters.");
+        }
+        await new Promise((r) => setTimeout(r, 350));
         const next: User = {
           id: crypto.randomUUID(),
           email,
           name: email.split("@")[0] || "Member",
         };
         setUser(next);
+        identify(next.id, { email: next.email });
+        track("sign_in", { method: "password" });
         return next;
       },
-      async signUp(name, email) {
-        const next: User = { id: crypto.randomUUID(), email, name };
+      async signUp(name, email, password) {
+        if (!name.trim() || name.trim().length < 2) {
+          throw new Error("Please enter your name.");
+        }
+        if (!email.includes("@") || !email.includes(".")) {
+          throw new Error("Enter a valid email address.");
+        }
+        if (!password || password.length < 8) {
+          throw new Error("Password must be at least 8 characters.");
+        }
+        await new Promise((r) => setTimeout(r, 350));
+        const next: User = { id: crypto.randomUUID(), email, name: name.trim() };
         setUser(next);
+        identify(next.id, { email: next.email, name: next.name });
+        track("sign_up", { method: "password" });
         return next;
       },
       signOut() {
+        track("sign_out");
         setUser(null);
       },
     }),
