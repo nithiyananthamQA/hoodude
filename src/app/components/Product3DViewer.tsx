@@ -32,29 +32,110 @@ export interface DesignLayer {
   hidden?: boolean;
 }
 
+/**
+ * Placement preset in normalised body-space:
+ * - xN: -1 = left edge, 0 = center, +1 = right edge of the body bbox X-range
+ * - yN: 0 = hem (bottom), 1 = collar (top) of the body bbox Y-range
+ * - zN: -1 = back, +1 = front of the body bbox Z-range
+ * - scaleN: fraction of the body bbox X-width to occupy
+ *
+ * The viewer resolves these to absolute mesh-local coordinates at render
+ * time using the actual body bbox so the same presets work across all our
+ * authored GLBs (white-tshirt, hood, zipper-hood, knitted-jacket), each of
+ * which has slightly different absolute coordinates.
+ */
+interface PlacementPreset {
+  xN: number;      // [-1, 1]
+  yN: number;      // [0, 1]
+  zN: -1 | 1;      // back or front
+  scaleN: number;  // fraction of body width
+  /** Optional in-plane rotation around the surface normal (radians). */
+  rollZ?: number;
+}
+
+const PLACEMENT_PRESETS: Record<string, PlacementPreset> = {
+  // Front side — yN ~0.75 is the chest line (about 3/4 up the body bbox).
+  chest_left:       { xN:  0.35, yN: 0.77, zN:  1, scaleN: 0.22 },
+  chest_center:     { xN:  0,    yN: 0.78, zN:  1, scaleN: 0.28 },
+  large_center:     { xN:  0,    yN: 0.55, zN:  1, scaleN: 0.55 },
+  sleeve_left_top:  { xN:  0.85, yN: 0.78, zN:  1, scaleN: 0.18 },
+  sleeve_right_top: { xN: -0.85, yN: 0.78, zN:  1, scaleN: 0.18 },
+  // Back side — full graphic across the upper-mid back.
+  back:             { xN:  0,    yN: 0.62, zN: -1, scaleN: 0.6 },
+  // Care/brand label below the back-collar (outside) and on the inside
+  // neckline (inside, same Z but slightly higher).
+  label_outside:    { xN:  0,    yN: 0.92, zN: -1, scaleN: 0.1 },
+  label_inside:     { xN:  0,    yN: 0.94, zN: -1, scaleN: 0.08 },
+};
+
+export function getPlacementPreset(id?: string): PlacementPreset | null {
+  if (!id) return null;
+  return PLACEMENT_PRESETS[id] ?? null;
+}
+
+interface BodyBounds {
+  min: THREE.Vector3;
+  max: THREE.Vector3;
+}
+
+/** Resolve a normalised preset to absolute mesh-local coordinates given the
+ *  body mesh's actual bounding box. */
+function resolvePlacement(id: string | undefined, bounds: BodyBounds | null): DecalTransform | null {
+  const preset = getPlacementPreset(id);
+  if (!preset || !bounds) return null;
+  const { min, max } = bounds;
+  const sizeX = max.x - min.x;
+  const sizeY = max.y - min.y;
+  const sizeZ = max.z - min.z;
+  const cx = (min.x + max.x) / 2;
+  const cy = (min.y + max.y) / 2;
+  // Front is the max-Z extent, back is the min-Z extent — small inset so
+  // the decal sits on the surface rather than floating off the very edge.
+  const frontZ = max.z - sizeZ * 0.05;
+  const backZ = min.z + sizeZ * 0.05;
+  const position: [number, number, number] = [
+    cx + (preset.xN * sizeX) / 2,
+    min.y + preset.yN * sizeY,
+    preset.zN === 1 ? frontZ : backZ,
+  ];
+  // Front-facing decals look forward (no Y-flip), back-facing decals are
+  // rotated 180° so they read correctly when the camera is behind the model.
+  const rotation: [number, number, number] = preset.zN === 1
+    ? [0, 0, preset.rollZ ?? 0]
+    : [0, Math.PI, preset.rollZ ?? 0];
+  return {
+    position,
+    rotation,
+    scale: sizeX * preset.scaleN,
+  };
+}
+
+/** Legacy export — used by CameraRig and a few callers that only need to
+ *  know "is this placement on the back?". Returns null body-bounds so the
+ *  absolute coordinates aren't relied on; callers should use the resolver
+ *  when they actually need to render a decal. */
 export function getPlacementProps(id?: string): DecalTransform | null {
-  switch (id) {
-    case "chest_left":       return { position: [0.11, 0.07, 0.15], rotation: [0, 0, 0], scale: 0.14 };
-    case "chest_center":     return { position: [0, 0.09, 0.15], rotation: [0, 0, 0], scale: 0.18 };
-    case "large_center":     return { position: [0, -0.05, 0.15], rotation: [0, 0, 0], scale: 0.35 };
-    case "back":             return { position: [0, 0, -0.165], rotation: [0, Math.PI, 0], scale: 0.38 };
-    case "sleeve_left_top":  return { position: [0.24, 0.08, 0.05], rotation: [0, Math.PI / 2.5, 0], scale: 0.12 };
-    case "sleeve_right_top": return { position: [-0.24, 0.08, 0.05], rotation: [0, -Math.PI / 2.5, 0], scale: 0.12 };
-    // Outside label sits on the back-yoke just below the collar — small
-    // printed care/brand mark. Inside label is the neck-tape interior; we
-    // approximate it on the inside-back of the collar area since the GLB
-    // doesn't expose a separate interior mesh.
-    case "label_outside":    return { position: [0, 0.14, -0.16], rotation: [0, Math.PI, 0], scale: 0.06 };
-    case "label_inside":     return { position: [0, 0.155, -0.155], rotation: [0, Math.PI, 0], scale: 0.05 };
-    default: return null;
-  }
+  // For camera-position purposes the absolute coordinate doesn't matter —
+  // CameraRig only looks at this to decide front-vs-back orbit. Return a
+  // sentinel based on the preset so existing callers keep working.
+  const preset = getPlacementPreset(id);
+  if (!preset) return null;
+  return {
+    position: [preset.xN * 0.15, 0.05, preset.zN === 1 ? 0.15 : -0.15],
+    rotation: preset.zN === 1 ? [0, 0, 0] : [0, Math.PI, 0],
+    scale: 0.2,
+  };
 }
 
 interface RenderedLayer {
   id: string;
   placementId: string;
   texture: THREE.Texture;
-  transform: DecalTransform;
+  /** Optional user-applied overrides; Model resolves the rest from the
+   *  body-mesh bbox at render time so coordinates work universally. */
+  customPosition?: [number, number, number];
+  customRotation?: [number, number, number];
+  customScale?: number;
 }
 
 interface ModelProps {
@@ -102,13 +183,16 @@ function Model({
   const groupRef = useRef<THREE.Group>(null!);
   const draggingRef = useRef(false);
 
-  // Identify the "body" mesh — the largest mesh in the scene that carries the
-  // garment surface. We rank candidates by vertex count + name heuristics so
-  // this works across our authored GLBs (Cloth_mesh, *_mesh, BindedTrim_*).
-  const bodyMeshName = useMemo(() => {
+  // Identify the body mesh + capture its bounding box. The bbox is what
+  // makes placement presets work universally across our different garment
+  // GLBs — each has its own absolute coordinate range (white-tshirt sits
+  // in Y[0.86, 1.58], hood in Y[0.86, 1.58], etc.) but the *relative*
+  // chest/sleeve/back positions are stable, so we resolve presets to
+  // absolute coords from the actual bbox at render time.
+  const { bodyMeshName, bodyBounds } = useMemo(() => {
     const entries = Object.entries(nodes) as Array<[string, any]>;
     const meshes = entries.filter(([, n]) => n?.isMesh && n.geometry);
-    if (meshes.length === 0) return null;
+    if (meshes.length === 0) return { bodyMeshName: null, bodyBounds: null };
     const score = (name: string, node: any) => {
       const lc = name.toLowerCase();
       let s = node.geometry?.attributes?.position?.count ?? 0;
@@ -123,7 +207,13 @@ function Model({
       const s = score(meshes[i][0], meshes[i][1]);
       if (s > bestScore) { best = meshes[i]; bestScore = s; }
     }
-    return best[0];
+    const bestNode = best[1];
+    bestNode.geometry.computeBoundingBox?.();
+    const box = bestNode.geometry.boundingBox as THREE.Box3 | null;
+    const bounds: BodyBounds | null = box
+      ? { min: box.min.clone(), max: box.max.clone() }
+      : null;
+    return { bodyMeshName: best[0], bodyBounds: bounds };
   }, [nodes]);
 
   // Update color. Body and trim are repainted independently so users can have
@@ -271,18 +361,21 @@ function Model({
             onWheel={isBody ? handleWheel : undefined}
           >
             {isBody && layers.map((layer) => {
-              // The active layer is the one the user is currently dragging,
-              // so honour the customDecal override (set from a pointer raycast).
+              // Resolve transform from the body bbox so coords work across
+              // all of our authored GLBs (each has a different absolute
+              // coordinate range). User overrides win where present.
+              const preset = resolvePlacement(layer.placementId, bodyBounds);
+              if (!preset) return null;
               const isActive = layer.placementId === activePlacement;
-              const t = isActive && customDecal
-                ? { position: customDecal.position, rotation: customDecal.rotation, scale: layer.transform.scale }
-                : layer.transform;
+              const finalPos = (isActive && customDecal?.position) ?? layer.customPosition ?? preset.position;
+              const finalRot = (isActive && customDecal?.rotation) ?? layer.customRotation ?? preset.rotation;
+              const finalScale = layer.customScale ?? preset.scale;
               return (
                 <Decal
                   key={layer.id}
-                  position={t.position as any}
-                  rotation={t.rotation as any}
-                  scale={t.scale as any}
+                  position={finalPos as any}
+                  rotation={finalRot as any}
+                  scale={finalScale as any}
                   map={layer.texture}
                 >
                   <meshStandardMaterial
@@ -298,23 +391,27 @@ function Model({
 
             {/* When there's no layer for the active placement, render a faded
                 placeholder so the user knows where the design will land. */}
-            {isBody && activePlacement && !layers.some(l => l.placementId === activePlacement) && getPlacementProps(activePlacement) && (
-              <Decal
-                position={getPlacementProps(activePlacement)!.position as any}
-                rotation={getPlacementProps(activePlacement)!.rotation as any}
-                scale={getPlacementProps(activePlacement)!.scale as any}
-                map={uploadTexture}
-              >
-                <meshStandardMaterial
+            {isBody && activePlacement && !layers.some(l => l.placementId === activePlacement) && (() => {
+              const preset = resolvePlacement(activePlacement, bodyBounds);
+              if (!preset) return null;
+              return (
+                <Decal
+                  position={preset.position as any}
+                  rotation={preset.rotation as any}
+                  scale={preset.scale as any}
                   map={uploadTexture}
-                  transparent
-                  opacity={0.55}
-                  polygonOffset
-                  polygonOffsetFactor={-10}
-                  depthTest={true}
-                />
-              </Decal>
-            )}
+                >
+                  <meshStandardMaterial
+                    map={uploadTexture}
+                    transparent
+                    opacity={0.55}
+                    polygonOffset
+                    polygonOffsetFactor={-10}
+                    depthTest={true}
+                  />
+                </Decal>
+              );
+            })()}
           </mesh>
         );
       })}
@@ -545,7 +642,9 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
     cache.clear();
   }, []);
 
-  // Resolve effective layers into renderable form (with texture + transform).
+  // Resolve effective layers into renderable form (with texture + per-layer
+  // overrides). The Model component does the final coord resolution against
+  // its body-mesh bbox so coordinates work across all 4 authored GLBs.
   const renderedLayers = useMemo<RenderedLayer[]>(() => {
     void textureVersion; // dep so we re-resolve when textures finish loading
     const cache = textureCacheRef.current;
@@ -553,16 +652,13 @@ const Product3DViewer = forwardRef<Product3DViewerHandle, Product3DViewerProps>(
       .map((l) => {
         const tex = cache.get(l.imageUrl);
         if (!tex) return null;
-        const preset = getPlacementProps(l.placementId) ?? { position: [0, 0, 0.15] as [number,number,number], rotation: [0,0,0] as [number,number,number], scale: 0.2 };
         return {
           id: l.id,
           placementId: l.placementId,
           texture: tex,
-          transform: {
-            position: l.customPosition ?? preset.position,
-            rotation: l.customRotation ?? preset.rotation,
-            scale: l.scale ?? preset.scale,
-          },
+          customPosition: l.customPosition,
+          customRotation: l.customRotation,
+          customScale: l.scale,
         } as RenderedLayer;
       })
       .filter((x): x is RenderedLayer => x !== null);
